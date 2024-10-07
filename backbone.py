@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 from timm.models.layers import DropPath
 from atten_flex_customize import NearestNeighborAttention
+from tome_costumize import TokenMerging
 
 class ConvTokenizer1D(nn.Module):
     def __init__(self, in_chans=1, embed_dim=96, norm_layer=None):
@@ -38,17 +39,27 @@ class Mlp(nn.Module):
 
 class CustomNATLayer(nn.Module):
     def __init__(self, dim, num_heads, num_neighbors, visual_cortex_mask, mlp_ratio=4., qkv_bias=True, drop=0., attn_drop=0., 
-                 drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm):
+                 drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm, tome_r=0):
         super().__init__()
         self.norm1 = norm_layer(dim)
         self.attn = NearestNeighborAttention(dim, num_heads, num_neighbors, visual_cortex_mask)
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
         self.norm2 = norm_layer(dim)
+
+        # Token merging module
+        self.token_merging = TokenMerging(r=tome_r)
+
         mlp_hidden_dim = int(dim * mlp_ratio)
         self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop)
 
     def forward(self, x):
-        x = x + self.drop_path(self.attn(self.norm1(x)))
+        #x = x + self.drop_path(self.attn(self.norm1(x)))
+        x_attn, metric = self.attn(self.norm1(x))
+        x = x + self.drop_path(x_attn)
+
+        # Token merging module
+        x = self.token_merging(x, metric)
+
         x = x + self.drop_path(self.mlp(self.norm2(x)))
         return x
 
