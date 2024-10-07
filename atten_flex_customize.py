@@ -104,7 +104,7 @@ def visualize_custom_attention(query, key, custom_mask_fn, device="cpu", name="c
 #     feature_dim = 32
 #     num_heads = 4
 #     num_neighbors = 5
-#     attention = NearestNeighborAttention(feature_dim, num_heads, num_neighbors, visual_cortex_mask)
+#     attention, _ = NearestNeighborAttention(feature_dim, num_heads, num_neighbors, visual_cortex_mask)
     
 #     # Create dummy input (only for masked voxels)
 #     batch_size = 1
