@@ -71,9 +71,12 @@ class NearestNeighborAttention(nn.Module):
         
         # Apply flex attention
         output = flex_attention(query, key, value, block_mask=self.attention_mask)
+
+        # Compute the metric: the mean of the key vectors over the heads
+        metric = key.mean(1)  # Averaging over heads
         
         # Reshape output and return
-        return output.transpose(1, 2).contiguous().view(batch_size, seq_len, self.feature_dim)
+        return output.transpose(1, 2).contiguous().view(batch_size, seq_len, self.feature_dim), metric
     
 def visualize_custom_attention(query, key, custom_mask_fn, device="cpu", name="custom_attention_mask"):
     from attn_gym import visualize_attention_scores
