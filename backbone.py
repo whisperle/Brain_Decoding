@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 from timm.models.layers import DropPath
 from atten_flex_customize import NearestNeighborAttention
-from tome_costumize import TokenMerging
+from tome_customize import TokenMerging
 
 class ConvTokenizer1D(nn.Module):
     def __init__(self, in_chans=1, embed_dim=96, norm_layer=None):
