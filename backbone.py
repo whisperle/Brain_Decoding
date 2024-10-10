@@ -50,16 +50,17 @@ class BrainNATLayer(nn.Module):
         self.token_merging = TokenMerging(r=tome_r)
 
         mlp_hidden_dim = int(dim * mlp_ratio)
+        # TODO: SWIGLU, LayerScale, 
         self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop)
 
     def forward(self, x, visual_cortex_mask):
-        x_attn, metric = self.attn(self.norm1(x), visual_cortex_mask)
+        x_attn, metric = self.attn(self.norm1(x), visual_cortex_mask) #TODO: learned vector here
         x = x + self.drop_path(x_attn)
 
         # Token merging module
         x = self.token_merging(x, metric)
 
-        x = x + self.drop_path(self.mlp(self.norm2(x)))
+        x = x + self.drop_path(self.mlp(self.norm2(x))) #TODO: add learned vector ...
         return x
 
 class BrainNATBlock(nn.Module):
@@ -148,14 +149,14 @@ if __name__ == "__main__":
         in_chans=1,
         embed_dim=128,
         depth=8,
-        num_heads=4,
-        num_neighbors=80,
-        tome_r=2000,
+        num_heads=8,
+        num_neighbors=32,
+        tome_r=500,
     ).to(device)
     print("Number of parameters:", count_params(model))
     model.train()
     # Create dummy input
-    batch_size = 2
+    batch_size = 32
     sequence_length = visual_cortex_mask.sum().item()
     print("Sequence length:", sequence_length)
     x = torch.randn(batch_size, 1, sequence_length, device=device)

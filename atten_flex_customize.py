@@ -73,7 +73,7 @@ class NearestNeighborAttention(nn.Module):
         output = flex_attention(query, key, value, block_mask=attention_mask)
 
         # Compute the metric: the mean of the key vectors over the heads
-        metric = key.mean(1)  # Averaging over heads
+        metric = key.mean(2)  # Averaging over heads
         # Reshape output and return
         return output.transpose(1, 2).contiguous().view(batch_size, seq_len, self.feature_dim), metric
     
