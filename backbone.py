@@ -81,7 +81,7 @@ class BrainNATBlock(nn.Module):
 
 class BrainNAT(nn.Module):
     def __init__(self, in_chans=1, embed_dim=96, depth=4, num_heads=8, num_neighbors=5, mlp_ratio=4., qkv_bias=True,
-                 drop_rate=0., attn_drop_rate=0., drop_path_rate=0.2, norm_layer=nn.LayerNorm,tome_r=0):
+                 drop_rate=0., attn_drop_rate=0., drop_path_rate=0.2, norm_layer=nn.LayerNorm,tome_r=0, coords=None):
         super().__init__()
         # Ensure embed_dim is a power of 2
         self.embed_dim = 2 ** int(torch.log2(torch.tensor(embed_dim)).ceil().item())
@@ -127,7 +127,12 @@ class BrainNAT(nn.Module):
 if __name__ == "__main__":
     import numpy as np
     import nibabel as nib
-    
+        
+    def count_params(model):
+        total = sum(p.numel() for p in model.parameters())
+        trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        print('param counts:\n{:,} total\n{:,} trainable'.format(total, trainable))
+        return trainable
     # Set up example data
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     subj = 1
@@ -137,17 +142,17 @@ if __name__ == "__main__":
     num_voxels = np.prod(fmri_scan.shape)
     
     visual_cortex_mask = torch.tensor(nsdgeneral_roi_mask, dtype=torch.bool, device=device)
-    
+    coords = torch.nonzero(visual_cortex_mask).float()
     # Initialize the model
     model = BrainNAT(
         in_chans=1,
         embed_dim=128,
-        depth=1,
-        num_heads=8,
-        num_neighbors=3,
+        depth=8,
+        num_heads=4,
+        num_neighbors=80,
         tome_r=2000,
     ).to(device)
-    
+    print("Number of parameters:", count_params(model))
     model.train()
     # Create dummy input
     batch_size = 2
@@ -157,7 +162,7 @@ if __name__ == "__main__":
     print("Input shape:", x.shape)
     
     # Forward pass
-    output = model(x, visual_cortex_mask)
+    output = model(x, coords)
     print("Output shape:", output.shape)
     
     # Create a virtual target
@@ -168,3 +173,97 @@ if __name__ == "__main__":
     loss = criterion(output, y)
     print("Loss:", loss.item())
     loss.backward()
+
+# import torch
+# import torch.nn as nn
+# import nibabel as nib
+# import numpy as np
+# from torch.cuda import OutOfMemoryError
+
+# # Define the ablation function
+# def ablation_study():
+#     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+#     subj = 1
+#     fmri_scan = nib.load(f'/scratch/cl6707/Shared_Datasets/NSD/nsddata/ppdata/subj0{subj}/func1pt8mm/valid_session01.nii.gz')
+#     nsdgeneral_roi_mask = nib.load(f'/scratch/cl6707/Shared_Datasets/NSD/nsddata/ppdata/subj0{subj}/func1pt8mm/roi/nsdgeneral.nii.gz').get_fdata() == 1
+#     visual_cortex_mask = torch.tensor(nsdgeneral_roi_mask, dtype=torch.bool, device=device)
+#     coords = torch.nonzero(visual_cortex_mask).float()
+    
+#     # Initial parameter values
+#     embed_dim = 64
+#     depth = 4
+#     num_heads = 4
+#     num_neighbors = 5
+#     tome_r = 1000
+    
+#     # Increment values
+#     increment = {
+#         'embed_dim': 32,
+#         'depth': 2,
+#         'num_heads': 2,
+#         'num_neighbors': 5,
+#         'tome_r': 500
+#     }
+    
+#     # Maximum values that do not cause memory errors
+#     max_values = {
+#         'embed_dim': embed_dim,
+#         'depth': depth,
+#         'num_heads': num_heads,
+#         'num_neighbors': num_neighbors,
+#         'tome_r': tome_r
+#     }
+    
+#     # Function to test model creation, forward pass, and backpropagation
+#     def test_model(embed_dim, depth, num_heads, num_neighbors, tome_r):
+#         try:
+#             try:
+#                 model = BrainNAT(
+#                     in_chans=1,
+#                     embed_dim=embed_dim,
+#                     depth=depth,
+#                     num_heads=num_heads,
+#                     num_neighbors=num_neighbors,
+#                     tome_r=tome_r,
+#                 ).to(device)
+#                 batch_size = 2
+#                 sequence_length = visual_cortex_mask.sum().item()
+#                 x = torch.randn(batch_size, 1, sequence_length, device=device)
+#                 output = model(x, coords)
+                
+#                 # Create a virtual target
+#                 y = torch.randn(output.shape, device=device)
+                
+#                 # Compute the loss
+#                 criterion = nn.MSELoss()
+#                 loss = criterion(output, y)
+#                 loss.backward()
+                
+#                 return True
+#             except OutOfMemoryError:
+#                 return False
+#         except RuntimeError as e:
+#             print(e)
+#             return False
+    
+#     # Ablation study
+#     for param in max_values.keys():
+#         while True:
+#             new_value = max_values[param] + increment[param]
+#             if test_model(
+#                 embed_dim=max_values['embed_dim'] if param != 'embed_dim' else new_value,
+#                 depth=max_values['depth'] if param != 'depth' else new_value,
+#                 num_heads=max_values['num_heads'] if param != 'num_heads' else new_value,
+#                 num_neighbors=max_values['num_neighbors'] if param != 'num_neighbors' else new_value,
+#                 tome_r=max_values['tome_r'] if param != 'tome_r' else new_value
+#             ):
+#                 max_values[param] = new_value
+#             else:
+#                 break
+    
+#     print("Maximum values without causing CUDA memory error:")
+#     for param, value in max_values.items():
+#         print(f"{param}: {value}")
+
+# # Run the ablation study
+# ablation_study()
