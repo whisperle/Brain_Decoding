@@ -317,3 +317,21 @@ def soft_cont_loss(student_preds, teacher_preds, teacher_aug_preds, temp=0.125):
     
     loss = (loss1 + loss2)/2
     return loss
+
+def save_ckpt(tag, args, model, optimizer, lr_scheduler, epoch, losses, test_losses, lrs, accelerator, ckpt_saving=True):
+    outdir = os.path.abspath(f'../train_logs/{args.model_name}')
+    if not os.path.exists(outdir) and ckpt_saving:
+        os.makedirs(outdir,exist_ok=True)
+    ckpt_path = outdir+f'/{tag}.pth'
+    if accelerator.is_main_process:
+        unwrapped_model = accelerator.unwrap_model(model)
+        torch.save({
+            'epoch': epoch,
+            'model_state_dict': unwrapped_model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'lr_scheduler': lr_scheduler.state_dict(),
+            'train_losses': losses,
+            'test_losses': test_losses,
+            'lrs': lrs,
+            }, ckpt_path)
+    print(f"\n---saved {outdir}/{tag} ckpt!---\n")
