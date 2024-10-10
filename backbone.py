@@ -42,6 +42,24 @@ class Mlp(nn.Module):
         x1, x2 = x.chunk(2, dim=-1)
         return F.silu(x1) * x2
 
+class SirenPositionalEmbedding(nn.Module):
+    def __init__(self, in_features, out_features, omega_0=30):
+        super().__init__()
+        self.linear = nn.Linear(in_features, out_features)
+        self.omega_0 = omega_0
+        self.in_features = in_features
+        self._init_weights()
+    
+    def _init_weights(self):
+        with torch.no_grad():
+            self.linear.weight.uniform_(-1 / self.in_features, 1 / self.in_features)
+    
+    def forward(self, coords):
+        # coords shape: [num_tokens, coord_dim]
+        x = self.linear(coords)
+        x = torch.sin(self.omega_0 * x)
+        return x  # shape: [num_tokens, out_features]
+
 class BrainNATLayer(nn.Module):
     def __init__(self, dim, num_heads, num_neighbors, mlp_ratio=4., qkv_bias=True, drop=0., attn_drop=0.,
                  drop_path=0., norm_layer=nn.LayerNorm, tome_r=0, layer_scale_init_value=1e-6):
@@ -83,22 +101,29 @@ class BrainNATBlock(nn.Module):
         return x
 
 class BrainNAT(nn.Module):
-    def __init__(self, in_chans=1, embed_dim=96, depth=4, num_heads=8, num_neighbors=5, mlp_ratio=4., qkv_bias=True,
-                 drop_rate=0., attn_drop_rate=0., drop_path_rate=0.2, norm_layer=nn.LayerNorm, tome_r=0,
-                 layer_scale_init_value=1e-6, coords=None):
+    def __init__(self, in_chans=1, embed_dim=96, pos_embed_dim=96, depth=4, num_heads=8, num_neighbors=5,
+                 mlp_ratio=4., qkv_bias=True, drop_rate=0., attn_drop_rate=0., drop_path_rate=0.2,
+                 norm_layer=nn.LayerNorm, tome_r=0, layer_scale_init_value=1e-6, coord_dim=3, omega_0=30):
         super().__init__()
         self.embed_dim = 2 ** int(torch.log2(torch.tensor(embed_dim)).ceil().item())
-        self.num_features = self.embed_dim
+        self.pos_embed_dim = pos_embed_dim
+        self.total_embed_dim = self.embed_dim + self.pos_embed_dim
+        self.num_features = self.total_embed_dim
         self.embed_layer = ConvTokenizer1D(in_chans=in_chans, embed_dim=self.embed_dim, norm_layer=norm_layer)
         self.pos_drop = nn.Dropout(p=drop_rate)
+        
+        # Positional Embedding using SIREN
+        self.pos_embed = SirenPositionalEmbedding(in_features=coord_dim, out_features=self.pos_embed_dim, omega_0=omega_0)
+        
         dpr = [x.item() for x in torch.linspace(0, drop_path_rate, depth)]
         self.blocks = BrainNATBlock(
-            dim=self.embed_dim, depth=depth, num_heads=num_heads, num_neighbors=num_neighbors,
+            dim=self.total_embed_dim,  # Update dim to total_embed_dim
+            depth=depth, num_heads=num_heads, num_neighbors=num_neighbors,
             mlp_ratio=mlp_ratio, qkv_bias=qkv_bias, drop=drop_rate,
             attn_drop=attn_drop_rate, drop_path=dpr, norm_layer=norm_layer, tome_r=tome_r,
             layer_scale_init_value=layer_scale_init_value)
-        self.norm = norm_layer(self.embed_dim)
-        self.head = nn.Linear(self.embed_dim, self.embed_dim)
+        self.norm = norm_layer(self.total_embed_dim)
+        self.head = nn.Linear(self.total_embed_dim, self.embed_dim)  # Map back to embed_dim
         self.apply(self._init_weights)
 
     def _init_weights(self, m):
@@ -110,15 +135,23 @@ class BrainNAT(nn.Module):
             nn.init.constant_(m.bias, 0)
             nn.init.constant_(m.weight, 1.0)
 
-    def forward_features(self, x, visual_cortex_mask):
-        x = self.embed_layer(x)
+    def forward_features(self, x, coords):
+        x = self.embed_layer(x)  # x shape: [batch_size, num_tokens, embed_dim]
         x = self.pos_drop(x)
-        x = self.blocks(x, visual_cortex_mask)
+        
+        # Compute positional embeddings
+        pos_embeds = self.pos_embed(coords)  # shape: [num_tokens, pos_embed_dim]
+        pos_embeds = pos_embeds.unsqueeze(0).expand(x.size(0), -1, -1)  # Expand to match batch size
+        
+        # Concatenate positional embeddings to the token embeddings
+        x = torch.cat([x, pos_embeds], dim=-1)  # x shape: [batch_size, num_tokens, total_embed_dim]
+        
+        x = self.blocks(x, coords)
         x = self.norm(x)
         return x
 
-    def forward(self, x, visual_cortex_mask):
-        x = self.forward_features(x, visual_cortex_mask)
+    def forward(self, x, coords):
+        x = self.forward_features(x, coords)
         x = self.head(x)
         return x
 
@@ -141,17 +174,25 @@ if __name__ == "__main__":
     num_voxels = np.prod(fmri_scan.shape)
 
     visual_cortex_mask = torch.tensor(nsdgeneral_roi_mask, dtype=torch.bool, device=device)
-    coords = torch.nonzero(visual_cortex_mask).float()
+    coords = torch.nonzero(visual_cortex_mask, as_tuple=False).float().to(device)
+    coord_dim = coords.shape[-1]
 
-    # Initialize the model with LayerScale and SwiGLU
+    # Initialize the model with adjusted dimensions
+    embed_dim = 128
+    pos_embed_dim = 128  # Ensure that total_embed_dim is divisible by num_heads
+    num_heads = 8  # Ensure total_embed_dim % num_heads == 0
+
     model = BrainNAT(
         in_chans=1,
-        embed_dim=128,
-        depth=8,
-        num_heads=8,
-        num_neighbors=32,
+        embed_dim=embed_dim,
+        pos_embed_dim=pos_embed_dim,
+        depth=4,
+        num_heads=num_heads,
+        num_neighbors=16,
         tome_r=500,
-        layer_scale_init_value=1e-6,  # Add this parameter
+        layer_scale_init_value=1e-6,
+        coord_dim=coord_dim,
+        omega_0=30,
     ).to(device)
 
     print("Number of parameters:", count_params(model))
