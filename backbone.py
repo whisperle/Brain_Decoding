@@ -62,7 +62,7 @@ class SirenPositionalEmbedding(nn.Module):
 
 class BrainNATLayer(nn.Module):
     def __init__(self, dim, num_heads, num_neighbors, mlp_ratio=4., qkv_bias=True, drop=0., attn_drop=0.,
-                 drop_path=0., norm_layer=nn.LayerNorm, tome_r=0, layer_scale_init_value=1e-6):
+                 drop_path=0., norm_layer=nn.LayerNorm, tome_r=0, layer_scale_init_value=1e-6, use_coords=True, last_n_features=16):
         super().__init__()
         self.norm1 = norm_layer(dim)
         self.attn = NearestNeighborAttention(dim, num_heads, num_neighbors)
@@ -75,9 +75,20 @@ class BrainNATLayer(nn.Module):
         # LayerScale parameters
         self.gamma_1 = nn.Parameter(layer_scale_init_value * torch.ones(dim), requires_grad=True)
         self.gamma_2 = nn.Parameter(layer_scale_init_value * torch.ones(dim), requires_grad=True)
+        
+        # Control whether to use coords or last N features for neighborhood attention
+        self.use_coords = use_coords
+        self.last_n_features = last_n_features  # N features to use after first layer
 
-    def forward(self, x, visual_cortex_mask):
-        x_attn, metric = self.attn(self.norm1(x), visual_cortex_mask)
+    def forward(self, x, coords):
+        if self.use_coords:
+            # Use initial coordinates for nearest-neighbor attention
+            x_attn, metric = self.attn(self.norm1(x), coords)
+        else:
+            # Use the last N features of x as new "coords" to calculate nearest-neighbors
+            last_n_features = x[:, :, -self.last_n_features:]
+            x_attn, metric = self.attn(self.norm1(x), last_n_features)
+        
         x = x + self.drop_path(self.gamma_1 * x_attn)
         x = self.token_merging(x, metric)
         x = x + self.drop_path(self.gamma_2 * self.mlp(self.norm2(x)))
@@ -85,25 +96,27 @@ class BrainNATLayer(nn.Module):
 
 class BrainNATBlock(nn.Module):
     def __init__(self, dim, depth, num_heads, num_neighbors, mlp_ratio=4., qkv_bias=True, drop=0.,
-                 attn_drop=0., drop_path=0., norm_layer=nn.LayerNorm, tome_r=0, layer_scale_init_value=1e-6):
+                 attn_drop=0., drop_path=0., norm_layer=nn.LayerNorm, tome_r=0, layer_scale_init_value=1e-6, last_n_features=16):
         super().__init__()
         self.blocks = nn.ModuleList([
             BrainNATLayer(
                 dim=dim, num_heads=num_heads, num_neighbors=num_neighbors,
                 mlp_ratio=mlp_ratio, qkv_bias=qkv_bias, drop=drop, attn_drop=attn_drop,
                 drop_path=drop_path[i] if isinstance(drop_path, list) else drop_path,
-                norm_layer=norm_layer, tome_r=tome_r, layer_scale_init_value=layer_scale_init_value)
+                norm_layer=norm_layer, tome_r=tome_r, layer_scale_init_value=layer_scale_init_value,
+                use_coords=(i == 0),  # Use coordinates in the first layer, switch after
+                last_n_features=last_n_features)  # Use the last N features after the first layer
             for i in range(depth)])
 
-    def forward(self, x, visual_cortex_mask):
+    def forward(self, x, coords):
         for blk in self.blocks:
-            x = blk(x, visual_cortex_mask)
+            x = blk(x, coords)
         return x
 
 class BrainNAT(nn.Module):
     def __init__(self, in_chans=1, embed_dim=96, pos_embed_dim=96, depth=4, num_heads=8, num_neighbors=5,
                  mlp_ratio=4., qkv_bias=True, drop_rate=0., attn_drop_rate=0., drop_path_rate=0.2,
-                 norm_layer=nn.LayerNorm, tome_r=0, layer_scale_init_value=1e-6, coord_dim=3, omega_0=30):
+                 norm_layer=nn.LayerNorm, tome_r=0, layer_scale_init_value=1e-6, coord_dim=3, omega_0=30,last_n_features=16):
         super().__init__()
         self.embed_dim = 2 ** int(torch.log2(torch.tensor(embed_dim)).ceil().item())
         self.pos_embed_dim = pos_embed_dim
@@ -121,7 +134,7 @@ class BrainNAT(nn.Module):
             depth=depth, num_heads=num_heads, num_neighbors=num_neighbors,
             mlp_ratio=mlp_ratio, qkv_bias=qkv_bias, drop=drop_rate,
             attn_drop=attn_drop_rate, drop_path=dpr, norm_layer=norm_layer, tome_r=tome_r,
-            layer_scale_init_value=layer_scale_init_value)
+            layer_scale_init_value=layer_scale_init_value,last_n_features=last_n_features)
         self.norm = norm_layer(self.total_embed_dim)
         self.head = nn.Linear(self.total_embed_dim, self.embed_dim)  # Map back to embed_dim
         self.apply(self._init_weights)
@@ -141,7 +154,7 @@ class BrainNAT(nn.Module):
         
         # Compute positional embeddings
         pos_embeds = self.pos_embed(coords)  # shape: [num_tokens, pos_embed_dim]
-        pos_embeds = pos_embeds.unsqueeze(0).expand(x.size(0), -1, -1)  # Expand to match batch size
+        # pos_embeds = pos_embeds.unsqueeze(0)  # Expand to match batch size
         
         # Concatenate positional embeddings to the token embeddings
         x = torch.cat([x, pos_embeds], dim=-1)  # x shape: [batch_size, num_tokens, total_embed_dim]
@@ -175,6 +188,7 @@ if __name__ == "__main__":
 
     visual_cortex_mask = torch.tensor(nsdgeneral_roi_mask, dtype=torch.bool, device=device)
     coords = torch.nonzero(visual_cortex_mask, as_tuple=False).float().to(device)
+    # set it to the batch size
     coord_dim = coords.shape[-1]
 
     # Initialize the model with adjusted dimensions
@@ -188,18 +202,20 @@ if __name__ == "__main__":
         pos_embed_dim=pos_embed_dim,
         depth=4,
         num_heads=num_heads,
-        num_neighbors=16,
+        num_neighbors=8,
         tome_r=500,
         layer_scale_init_value=1e-6,
         coord_dim=coord_dim,
         omega_0=30,
+        last_n_features=16 # Use the last 16 features used for find nearest neighbors, should be less than embed_dim at least
     ).to(device)
 
     print("Number of parameters:", count_params(model))
     model.train()
 
     # Create dummy input
-    batch_size = 32
+    batch_size = 2
+    coords = coords.unsqueeze(0).repeat(batch_size, 1, 1)
     sequence_length = visual_cortex_mask.sum().item()
     print("Sequence length:", sequence_length)
     x = torch.randn(batch_size, 1, sequence_length, device=device)
