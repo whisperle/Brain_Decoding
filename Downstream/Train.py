@@ -31,6 +31,9 @@ torch.backends.cuda.matmul.allow_tf32 = True
 import utils
 from utils import save_ckpt
 
+import re
+
+from IPython import embed
 
 def parse_arguments():
     parser = argparse.ArgumentParser(description="Model Training Configuration")
@@ -47,6 +50,7 @@ def parse_arguments():
         help="Path to where miscellaneous files downloaded from huggingface are stored. Defaults to current directory.",
     )
     #TODO: We gonna validate on all the subjects in the ideal case since we are doing multi-subject stuff.
+    # held-out subject
     parser.add_argument(
         "--subj", type=int, default=1, choices=[1, 2, 3, 4, 5, 6, 7, 8],
         help="Validate on which subject?",
@@ -64,7 +68,7 @@ def parse_arguments():
         help="Whether to train diffusion prior (True) or just rely on retrieval part of the pipeline (False)",
     )
     parser.add_argument(
-        "--batch_size", type=int, default=16,
+        "--batch_size", type=int, default=8,
         help="Batch size can be increased by 10x if only training retrieval submodule and not diffusion prior",
     )
     parser.add_argument(
@@ -145,46 +149,57 @@ def parse_arguments():
 
 
 def prepare_data(args, data_type):
-    
-    # TODO: We need to change the way we load the data to include all the subjects. Also we need to do the padding since # of voxels are different for each subject.
     # TODO: nsdgeneral masks are also needed for each subject. We need them as the guidance for the NAT.
     def my_split_by_node(urls): return urls
-    subj_list = [args.subj]
     num_voxels_list = []
 
     if args.multi_subject:
+        subj_list = np.arange(1,9)
+        subj_list = subj_list[subj_list != subj]
         nsessions_allsubj = np.array([40, 40, 32, 30, 40, 32, 40, 30])
-        num_samples_per_epoch = (750 * 40) // args.batch_size
+        num_samples_per_epoch = (750 * 40 * 7) // args.batch_size
     else:
+        subj_list = [args.subj]
         num_samples_per_epoch = (750 * args.num_sessions) // args.batch_size
 
-    print("Dividing batch size by subj_list, which will then be concatenated across subjects during training...")
-    batch_size = args.batch_size // len(subj_list)
-    num_iterations_per_epoch = num_samples_per_epoch // (batch_size * len(subj_list))
-    print("batch_size =", batch_size, "num_iterations_per_epoch =", num_iterations_per_epoch,
-          "num_samples_per_epoch =", num_samples_per_epoch)
+    num_iterations_per_epoch = num_samples_per_epoch // args.batch_size
+    print("batch_size =", args.batch_size, "num_iterations_per_epoch =", num_iterations_per_epoch,
+        "num_samples_per_epoch =", num_samples_per_epoch)
 
-    train_data = {}
-    train_dl = {}
+    train_data_list = []
     num_voxels = {}
     voxels = {}
+
+    if args.multi_subject:
+        train_urls = [
+            f"{args.data_path}/wds/subj0{s}/train/{i}.tar"
+            for s in subj_list
+            for i in range(nsessions_allsubj[s - 1])
+        ]
+        random.shuffle(train_urls)
+    else:
+        train_urls = f"{args.data_path}/wds/subj0{args.subj}/train/" + "{0.." + f"{args.num_sessions - 1}" + "}.tar"
+
+    subject_pattern = re.compile(r"/subj0(\d+)/")
+
+    def add_subject(sample):
+        match = subject_pattern.search(sample["__url__"])
+        if match:
+            sample["subject_id"] = int(match.group(1))
+        return sample
+
+    train_data = (
+        wds.WebDataset(train_urls, resampled=False, nodesplitter=my_split_by_node)
+        .shuffle(1500, initial=1500, rng=random.Random(42))
+        .decode("torch")
+        .rename(behav="behav.npy", past_behav="past_behav.npy", future_behav="future_behav.npy", olds_behav="olds_behav.npy")
+        .map(add_subject)
+        .to_tuple("behav", "past_behav", "future_behav", "olds_behav", "subject_id")
+    )
+
+    train_dl = torch.utils.data.DataLoader(train_data, batch_size=args.batch_size, shuffle=False, drop_last=False, pin_memory=True)
+
     for s in subj_list:
-        print(f"Training with {args.num_sessions} sessions")
-        if args.multi_subject:
-            train_url = f"{args.data_path}/wds/subj0{s}/train/" + "{0.." + f"{nsessions_allsubj[s - 1] - 1}" + "}.tar"
-        else:
-            train_url = f"{args.data_path}/wds/subj0{s}/train/" + "{0.." + f"{args.num_sessions - 1}" + "}.tar"
-        print(train_url)
-
-        train_data[f'subj0{s}'] = wds.WebDataset(train_url, resampled=True, nodesplitter=my_split_by_node) \
-            .shuffle(750, initial=1500, rng=random.Random(42)) \
-            .decode("torch") \
-            .rename(behav="behav.npy", past_behav="past_behav.npy", future_behav="future_behav.npy",
-                    olds_behav="olds_behav.npy") \
-            .to_tuple(*["behav", "past_behav", "future_behav", "olds_behav"])
-        train_dl[f'subj0{s}'] = torch.utils.data.DataLoader(train_data[f'subj0{s}'], batch_size=batch_size,
-                                                            shuffle=False, drop_last=False, pin_memory=True)
-
         f = h5py.File(f'{args.data_path}/betas_all_subj0{s}_fp32_renorm.hdf5', 'r')
         betas = f['betas'][:]
         betas = torch.Tensor(betas).to("cpu").to(data_type)
@@ -207,22 +222,24 @@ def prepare_data(args, data_type):
         test_url = f"{args.data_path}/wds/subj0{subj}/new_test/" + "0.tar"
 
     print(test_url)
-    test_data = wds.WebDataset(test_url, resampled=False, nodesplitter=my_split_by_node) \
-        .shuffle(750, initial=1500, rng=random.Random(42)) \
-        .decode("torch") \
-        .rename(behav="behav.npy", past_behav="past_behav.npy", future_behav="future_behav.npy",
-                olds_behav="olds_behav.npy") \
-        .to_tuple(*["behav", "past_behav", "future_behav", "olds_behav"])
+    test_data = (
+        wds.WebDataset(test_url, resampled=False, nodesplitter=my_split_by_node)
+        .shuffle(1500, initial=1500, rng=random.Random(42))
+        .decode("torch")
+        .rename(behav="behav.npy", past_behav="past_behav.npy", future_behav="future_behav.npy", olds_behav="olds_behav.npy")
+        .map(add_subject)
+        .to_tuple("behav", "past_behav", "future_behav", "olds_behav", "subject_id")
+    )
     test_dl = torch.utils.data.DataLoader(test_data, batch_size=num_test, shuffle=False, drop_last=True,
-                                          pin_memory=True)
-    print(f"Loaded test loader for subj{subj}!\n")
+                                        pin_memory=True)
+    print(f"Loaded test loader for subj0{subj}!\n")
 
     # Load all 73k NSD images
     f = h5py.File(f'{args.data_path}/coco_images_224_float16.hdf5', 'r')
     images = f['images']
     print("Loaded all 73k possible NSD images to CPU!", images.shape)
 
-    return train_dl, test_dl, images, num_voxels_list, num_iterations_per_epoch, num_samples_per_epoch, num_test, voxels
+    return train_dl, test_dl, images, num_voxels_list, num_iterations_per_epoch, num_samples_per_epoch, num_test, voxels, num_voxels
 
 
 
@@ -425,7 +442,7 @@ def setup_wandb(args, num_params, train_url, test_url):
 
 def train(args, model, train_dl, test_dl, images, accelerator, device, data_type, num_iterations_per_epoch,
           num_test, subj_list, clip_img_embedder, optimizer, lr_scheduler, wandb_log, autoenc, cnx, mean, std,
-          blur_augs, local_rank, voxels):
+          blur_augs, local_rank, voxels, num_voxels):
     epoch = 0
     losses, test_losses, lrs = [], [], []
     best_test_loss = 1e9
@@ -441,11 +458,11 @@ def train(args, model, train_dl, test_dl, images, accelerator, device, data_type
     use_image_aug = args.use_image_aug
     blurry_recon = args.blurry_recon
     use_prior = args.use_prior
+    model_name = args.model_name
 
-    train_dls = [train_dl[f'subj0{s}'] for s in subj_list]
-    model, optimizer, *train_dls, lr_scheduler = accelerator.prepare(model, optimizer, *train_dls, lr_scheduler)
+    model, optimizer, train_dl, lr_scheduler = accelerator.prepare(model, optimizer, train_dl, lr_scheduler)
 
-    print(f"{args.model_name} starting with epoch {epoch} / {num_epochs}")
+    print(f"{model_name} starting with epoch {epoch} / {num_epochs}")
     progress_bar = tqdm(range(epoch,num_epochs), ncols=1200, disable=(local_rank!=0))
     test_image, test_voxel = None, None
     mse = nn.MSELoss()
@@ -477,49 +494,58 @@ def train(args, model, train_dl, test_dl, images, accelerator, device, data_type
         test_blurry_pixcorr = 0. # needs >.456 to beat low-level subj01 results in mindeye v1
 
         # pre-load all batches for this epoch (it's MUCH faster to pre-load in bulk than to separate loading per batch)
-        voxel_iters = {} # empty dict because diff subjects have differing # of voxels
-        image_iters = torch.zeros(num_iterations_per_epoch, batch_size*len(subj_list), 3, 224, 224).float()
-        annot_iters = {}
-        perm_iters, betas_iters, select_iters = {}, {}, {}
-        for s, train_dl in enumerate(train_dls):
-            with torch.amp.autocast('cuda', dtype=data_type):
-                iter = -1
-                for behav0, past_behav0, future_behav0, old_behav0 in train_dl: 
-                    # Load images to cpu from hdf5 (requires sorted indexing)
-                    image_idx = behav0[:,0,0].cpu().long().numpy()
-                    image0, image_sorted_idx = np.unique(image_idx, return_index=True)                
-                    if len(image0) != len(image_idx): # hdf5 cant handle duplicate indexing
-                        continue
-                    iter += 1
-                    image0 = torch.tensor(images[image0], dtype=data_type)
-                    image_iters[iter,s*batch_size:s*batch_size+batch_size] = image0
-                    
-                    # Load voxels for current batch, matching above indexing
-                    voxel_idx = behav0[:,0,5].cpu().long().numpy()
-                    voxel_sorted_idx = voxel_idx[image_sorted_idx]
-                    voxel0 = voxels[f'subj0{subj_list[s]}'][voxel_sorted_idx]
-                    voxel0 = torch.Tensor(voxel0).unsqueeze(1)
+        voxel_iters = [] # empty dict because diff subjects have differing # of voxels
+        image_iters = torch.zeros(num_iterations_per_epoch, batch_size, 3, 224, 224).float()
+        annot_iters = []
+        perm_iters, betas_iters, select_iters = [], [], []
+        subj_idx_iters = []
+        with torch.cuda.amp.autocast(dtype=data_type):
+            iter = -1
+            for behav0, past_behav0, future_behav0, old_behav0, subj_idx in train_dl: 
+                # Load images to cpu from hdf5 (requires sorted indexing)
+                image_idx = behav0[:,0,0].cpu().long().numpy()
+                image0, image_sorted_idx = np.unique(image_idx, return_index=True)                
+                if len(image0) != len(image_idx): # hdf5 cant handle duplicate indexing
+                    continue
+                iter += 1
+                image0 = torch.tensor(images[image0], dtype=data_type)
+                image_iters[iter] = image0
+                
+                # Load voxels for current batch, matching above indexing
+                voxel_idx = behav0[:,0,5].cpu().long().numpy()
+                voxel_sorted_idx = voxel_idx[image_sorted_idx]
 
-                    if epoch < int(mixup_pct * num_epochs):
-                        voxel0, perm, betas, select = utils.mixco(voxel0)
-                        perm_iters[f"subj0{subj_list[s]}_iter{iter}"] = perm
-                        betas_iters[f"subj0{subj_list[s]}_iter{iter}"] = betas
-                        select_iters[f"subj0{subj_list[s]}_iter{iter}"] = select
+                subj_idx = subj_idx.cpu().long().numpy()
+                subj_sorted_idx = subj_idx[image_sorted_idx]
+                subj_idx_iters.append(subj_sorted_idx)
 
-                    voxel_iters[f"subj0{subj_list[s]}_iter{iter}"] = voxel0
+                max_voxel_len = np.max([num_voxels[f'subj0{s}'] for s in np.unique(subj_idx)])
+                voxel0 = torch.zeros((batch_size,1,max_voxel_len), dtype=data_type)
 
-                    if iter >= num_iterations_per_epoch-1:
-                        break
+                for i,s in enumerate(subj_sorted_idx):
+                    voxel = voxels[f'subj0{s}'][voxel_sorted_idx[i]]
+                    voxel0[i,0,:len(voxel)] = voxel
+
+                if epoch < int(mixup_pct * num_epochs):
+                    voxel0, perm, betas, select = utils.mixco(voxel0)
+                    perm_iters.append(perm)
+                    betas_iters.append(betas)
+                    select_iters.append(select)
+
+                voxel_iters.append(voxel0)
+
+                if iter >= num_iterations_per_epoch-1:
+                    break
 
         # you now have voxel_iters and image_iters with num_iterations_per_epoch batches each
         for train_i in range(num_iterations_per_epoch):
-            with torch.amp.autocast('cuda',dtype=data_type):
+            with torch.cuda.amp.autocast(dtype=data_type):
                 optimizer.zero_grad()
                 loss=0.
 
-                voxel_list = [voxel_iters[f"subj0{s}_iter{train_i}"].detach().to(device) for s in subj_list]
-                image = image_iters[train_i].detach()
-                image = image.to(device)
+                voxel = voxel_iters[train_i].to(device)
+                image = image_iters[train_i].detach().to(device)
+                subj_idx = subj_idx_iters[train_i]
 
                 if use_image_aug: 
                     image = img_augment(image)
@@ -528,18 +554,16 @@ def train(args, model, train_dl, test_dl, images, accelerator, device, data_type
                 assert not torch.any(torch.isnan(clip_target))
 
                 if epoch < int(mixup_pct * num_epochs):
-                    perm_list = [perm_iters[f"subj0{s}_iter{train_i}"].detach().to(device) for s in subj_list]
-                    perm = torch.cat(perm_list, dim=0)
-                    betas_list = [betas_iters[f"subj0{s}_iter{train_i}"].detach().to(device) for s in subj_list]
-                    betas = torch.cat(betas_list, dim=0)
-                    select_list = [select_iters[f"subj0{s}_iter{train_i}"].detach().to(device) for s in subj_list]
-                    select = torch.cat(select_list, dim=0)
+                    perm = perm_iters[train_i].detach().to(device)
+                    betas = betas_iters[train_i].detach().to(device)
+                    select = select_iters[train_i].detach().to(device)
 
-                voxel_ridge_list = [model.ridge(voxel_list[si],si) for si,s in enumerate(subj_list)]
-                voxel_ridge = torch.cat(voxel_ridge_list, dim=0)
+                # TODO: replace model
+                # voxel_nat = model(voxel, subj_idx)
+                
+                voxel_ridge = torch.zeros((batch_size,1,args.hidden_dim)).float().to(device)
 
                 backbone, clip_voxels, blurry_image_enc_ = model.backbone(voxel_ridge)
-
                 if clip_scale>0:
                     clip_voxels_norm = nn.functional.normalize(clip_voxels.flatten(1), dim=-1)
                     clip_target_norm = nn.functional.normalize(clip_target.flatten(1), dim=-1)
@@ -624,14 +648,19 @@ def train(args, model, train_dl, test_dl, images, accelerator, device, data_type
 
         model.eval()
         if local_rank==0:
-            with torch.no_grad(), torch.amp.autocast('cuda',dtype=data_type): 
-                for test_i, (behav, past_behav, future_behav, old_behav) in enumerate(test_dl):  
+            with torch.no_grad(), torch.cuda.amp.autocast(dtype=data_type): 
+                for test_i, (behav, past_behav, future_behav, old_behav, subj_idx) in enumerate(test_dl):  
                     # all test samples should be loaded per batch such that test_i should never exceed 0
                     assert len(behav) == num_test
 
                     ## Average same-image repeats ##
                     if test_image is None:
-                        voxel = voxels[f'subj0{args.subj}'][behav[:,0,5].cpu().long()].unsqueeze(1)
+                        max_voxel_len = np.max([num_voxels[f'subj0{s}'] for s in np.unique(subj_idx)])
+                        voxel = torch.zeros((num_test,1,max_voxel_len), dtype=data_type)
+                        for i,s in enumerate(subj_idx):
+                            voxel_ = voxels[f'subj0{s}'][behav[:,0,5].cpu().long()[i]]
+                            voxel[i,0,:len(voxel_)] = voxel_
+                        # voxel = voxels[f'subj0{subj}'][behav[:,0,5].cpu().long()].unsqueeze(1)
                         
                         image = behav[:,0,0].cpu().long()
 
@@ -660,7 +689,9 @@ def train(args, model, train_dl, test_dl, images, accelerator, device, data_type
                     clip_target = clip_img_embedder(image.float())
 
                     for rep in range(3):
-                        voxel_ridge = model.ridge(voxel[:,rep],0) # 0th index of subj_list
+                        # TODO: replace model
+                        voxel_ridge = torch.zeros((num_test,1,args.hidden_dim)).float().to(device)
+                        
                         backbone0, clip_voxels0, blurry_image_enc_ = model.backbone(voxel_ridge)
                         if rep==0:
                             clip_voxels = clip_voxels0
@@ -801,7 +832,7 @@ def main():
     else:
         img_augment = None
 
-    train_dl, test_dl, images, num_voxels_list, num_iterations_per_epoch, num_samples_per_epoch, num_test, voxels = prepare_data(
+    train_dl, test_dl, images, num_voxels_list, num_iterations_per_epoch, num_samples_per_epoch, num_test, voxels, num_voxels = prepare_data(
         args, data_type)
 
     clip_img_embedder, model, autoenc, cnx, mean, std, blur_augs = build_model(args, device, data_type,
@@ -815,7 +846,7 @@ def main():
 
     train(args, model, train_dl, test_dl, images, accelerator, device, data_type, num_iterations_per_epoch,
           num_test, [args.subj], clip_img_embedder, optimizer, lr_scheduler, wandb_log, autoenc, cnx, mean, std,
-          blur_augs, local_rank, voxels)
+          blur_augs, local_rank, voxels, num_voxels)
 
 
 if __name__ == "__main__":

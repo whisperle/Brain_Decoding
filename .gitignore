@@ -5,6 +5,12 @@ __pycache__/
 # notebook
 .ipynb_checkpoints/
 
+# tran_longs
+train_logs/
+
+# test files
+**/test*
+
 # C extensions
 *.so
 
