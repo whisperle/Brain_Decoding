@@ -17,10 +17,9 @@ class MindEye2Dataset(Dataset):
         self.samples = list(iter(self.dataset))
         self.coords = {}
         for subj in subj_list:
-            # f = h5py.File(f'/scratch/cl6707/Shared_Datasets/NSD/nsddata/ppdata/subj0{subj}/func1pt8mm/roi', 'r')
             mask =  nib.load(f'/scratch/cl6707/Shared_Datasets/NSD/nsddata/ppdata/subj0{subj}/func1pt8mm/roi/nsdgeneral.nii.gz').get_fdata() == 1
-            mask = torch.tensor(mask, dtype=torch.bool, device=device)
-            coords = torch.nonzero(mask, as_tuple=False).float().to(device)
+            mask = torch.tensor(mask, dtype=torch.bool)
+            coords = torch.nonzero(mask, as_tuple=False).float()
             self.coords[f'subj0{subj}'] = coords
     
     def __len__(self):
@@ -101,17 +100,23 @@ def load_images(args):
     return images
 
 def pad_collate_fn(batch):
-    images, voxels, subj_idx = zip(*batch)
-    max_length = max(item.shape[1] for item in voxels)
-
+    images, voxels, subj_idx, coords = zip(*batch)
+    
+    max_voxel_length = max(item.shape[1] for item in voxels)
     padded_voxels = [
-        torch.nn.functional.pad(item, (0, max_length - item.shape[1]))
+        torch.nn.functional.pad(item, (0, max_voxel_length - item.shape[1]))
         for item in voxels
     ]
     padded_voxels = torch.stack(padded_voxels, dim=0)
+    
+    max_coord_length = max(item.shape[0] for item in coords)
+    padded_coords = [
+        torch.nn.functional.pad(item, (0, 0, 0, max_coord_length - item.shape[0]))
+        for item in coords
+    ]
+    padded_coords = torch.stack(padded_coords, dim=0)
 
-    return images, padded_voxels, subj_idx
-
+    return images, padded_voxels, subj_idx, padded_coords
 
 # if __name__ == "__main__":
 #     from Train import parse_arguments
@@ -125,7 +130,7 @@ def pad_collate_fn(batch):
 #         train_data, 
 #         batch_size=32,
 #         shuffle=True,
-#         num_workers=4,
+#         num_workers=8,
 #         collate_fn=pad_collate_fn
 #     )
 
@@ -133,6 +138,6 @@ def pad_collate_fn(batch):
 #         test_data, 
 #         batch_size=32,
 #         shuffle=True,
-#         num_workers=4,
+#         num_workers=8,
 #         collate_fn=pad_collate_fn
 #     )
