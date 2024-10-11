@@ -1,17 +1,6 @@
 import torch
 import torch.nn as nn
 from torch.nn.attention.flex_attention import flex_attention, create_block_mask
-from attn_gym import visualize_attention_scores
-
-def visualize_custom_attention(query, key, custom_mask_fn, device="cpu", name="custom_attention_mask"):
-    from attn_gym import visualize_attention_scores
-    visualize_attention_scores(
-        query,
-        key,
-        mask_mod=custom_mask_fn,
-        device=device,
-        name=name,
-    )
 
 class NearestNeighborAttention(nn.Module):
     def __init__(self, feature_dim, num_heads, num_neighbors):
@@ -26,22 +15,30 @@ class NearestNeighborAttention(nn.Module):
         self.key_proj = nn.Linear(feature_dim, feature_dim, bias=False)
         self.value_proj = nn.Linear(feature_dim, feature_dim, bias=False)
 
-    def _compute_nearest_neighbors(self, voxel_coords):
+    def _compute_nearest_neighbors(self, voxel_coords, lens):
         """
-        Efficiently compute the nearest neighbors for each voxel using broadcasting and matrix operations.
+        Efficiently compute the nearest neighbors for each voxel using broadcasting and matrix operations,
+        taking sequence lengths into account.
         
         Args:
             voxel_coords (torch.Tensor): Tensor of shape [batch_size, seq_len, coord_dim]
+            lens (torch.Tensor): Tensor of shape [batch_size], containing lengths of each sequence
             
         Returns:
             torch.Tensor: Nearest neighbors indices, shape [batch_size, seq_len, num_neighbors]
         """
         batch_size, seq_len, _ = voxel_coords.shape
 
+        # Mask for valid sequences based on lengths
+        valid_mask = torch.arange(seq_len, device=lens.device).expand(batch_size, seq_len) < lens.unsqueeze(1)
+        
+        # Set out-of-bound coordinates to a large value to exclude them from nearest neighbor calculations
+        masked_coords = voxel_coords.clone()
+        masked_coords[~valid_mask] = float('inf')
+
         # Compute pairwise distances in a batched manner
-        # voxel_coords: [batch_size, seq_len, coord_dim]
-        voxel_coords_expanded = voxel_coords.unsqueeze(1)  # [batch_size, 1, seq_len, coord_dim]
-        voxel_coords_repeated = voxel_coords.unsqueeze(2)  # [batch_size, seq_len, 1, coord_dim]
+        voxel_coords_expanded = masked_coords.unsqueeze(1)  # [batch_size, 1, seq_len, coord_dim]
+        voxel_coords_repeated = masked_coords.unsqueeze(2)  # [batch_size, seq_len, 1, coord_dim]
 
         # Compute squared distances
         dists = torch.norm(voxel_coords_expanded - voxel_coords_repeated, dim=-1)  # [batch_size, seq_len, seq_len]
@@ -51,19 +48,21 @@ class NearestNeighborAttention(nn.Module):
         nearest_voxels = torch.argsort(dists, dim=-1)[:, :, 1:self.num_neighbors+1]  # [batch_size, seq_len, num_neighbors]
 
         return nearest_voxels
-    
-    def _create_attention_mask(self, nearest_voxels):
+
+    def _create_attention_mask(self, nearest_voxels, lens):
         # nearest_voxels: [batch_size, seq_len, num_neighbors]
         batch_size, seq_len, _ = nearest_voxels.shape
+        
+        # Create a mask for the valid lengths
+        valid_mask = torch.arange(seq_len, device=lens.device).expand(batch_size, seq_len) < lens.unsqueeze(1)
+
         def _neighborhood_mask(b, h, q_idx, kv_idx):
-            # Ensure indices are within bounds
+            # Ensure indices are within bounds and valid length
             q_idx = torch.clamp(q_idx, 0, seq_len - 1)
             kv_idx = torch.clamp(kv_idx, 0, seq_len - 1)
-            # Check if kv_idx is among the nearest neighbors of q_idx
-            return torch.any(
-                nearest_voxels[b, q_idx] == kv_idx.unsqueeze(-1),
-                dim=-1
-            )
+            valid_kv_mask = valid_mask[b, kv_idx]  # Only allow attention to valid indices
+            return valid_kv_mask & torch.any(nearest_voxels[b, q_idx] == kv_idx.unsqueeze(-1), dim=-1)
+
         return create_block_mask(
             _neighborhood_mask,
             B=batch_size,
@@ -73,15 +72,18 @@ class NearestNeighborAttention(nn.Module):
             device=nearest_voxels.device
         )
 
-    def forward(self, x, coords):
+    def forward(self, x, coords, lens):
         # x: [batch_size, seq_len, feature_dim]
         # coords: [batch_size, seq_len, coord_dim]
+        # lens: [batch_size], the lengths of the valid sequences
+
         batch_size, seq_len, _ = x.shape
         
-        # Compute nearest neighbors
-        nearest_voxels = self._compute_nearest_neighbors(coords)
+        # Compute nearest neighbors, respecting the valid sequence lengths
+        nearest_voxels = self._compute_nearest_neighbors(coords, lens)
+
         # Create the attention mask
-        attention_mask = self._create_attention_mask(nearest_voxels)
+        attention_mask = self._create_attention_mask(nearest_voxels, lens)
         
         # Project input to query, key, and value
         query = self.query_proj(x)

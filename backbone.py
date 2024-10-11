@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 from timm.models.layers import DropPath
 from atten_flex_customize import NearestNeighborAttention
 from tome_customize import TokenMerging
@@ -24,7 +25,6 @@ class Mlp(nn.Module):
     def __init__(self, in_features, hidden_features=None, out_features=None, drop=0.):
         super().__init__()
         out_features = out_features or in_features
-        # For SwiGLU, we double the hidden features
         hidden_features = hidden_features or int(in_features * 4)
         self.fc1 = nn.Linear(in_features, hidden_features)
         self.fc2 = nn.Linear(hidden_features // 2, out_features)  # Divide by 2 because of chunking
@@ -55,10 +55,9 @@ class SirenPositionalEmbedding(nn.Module):
             self.linear.weight.uniform_(-1 / self.in_features, 1 / self.in_features)
     
     def forward(self, coords):
-        # coords shape: [num_tokens, coord_dim]
         x = self.linear(coords)
         x = torch.sin(self.omega_0 * x)
-        return x  # shape: [num_tokens, out_features]
+        return x
 
 class BrainNATLayer(nn.Module):
     def __init__(self, dim, num_heads, num_neighbors, mlp_ratio=4., qkv_bias=True, drop=0., attn_drop=0.,
@@ -69,25 +68,21 @@ class BrainNATLayer(nn.Module):
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
         self.norm2 = norm_layer(dim)
         self.token_merging = TokenMerging(r=tome_r)
-        mlp_hidden_dim = int(dim * mlp_ratio * 2)  # Multiply by 2 for SwiGLU
+        mlp_hidden_dim = int(dim * mlp_ratio * 2)
         self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, drop=drop)
 
-        # LayerScale parameters
         self.gamma_1 = nn.Parameter(layer_scale_init_value * torch.ones(dim), requires_grad=True)
         self.gamma_2 = nn.Parameter(layer_scale_init_value * torch.ones(dim), requires_grad=True)
         
-        # Control whether to use coords or last N features for neighborhood attention
         self.use_coords = use_coords
-        self.last_n_features = last_n_features  # N features to use after first layer
+        self.last_n_features = last_n_features
 
-    def forward(self, x, coords):
+    def forward(self, x, coords, lens):
         if self.use_coords:
-            # Use initial coordinates for nearest-neighbor attention
-            x_attn, metric = self.attn(self.norm1(x), coords)
+            x_attn, metric = self.attn(self.norm1(x), coords, lens)
         else:
-            # Use the last N features of x as new "coords" to calculate nearest-neighbors
             last_n_features = x[:, :, -self.last_n_features:]
-            x_attn, metric = self.attn(self.norm1(x), last_n_features)
+            x_attn, metric = self.attn(self.norm1(x), last_n_features, lens)
         
         x = x + self.drop_path(self.gamma_1 * x_attn)
         x = self.token_merging(x, metric)
@@ -104,39 +99,37 @@ class BrainNATBlock(nn.Module):
                 mlp_ratio=mlp_ratio, qkv_bias=qkv_bias, drop=drop, attn_drop=attn_drop,
                 drop_path=drop_path[i] if isinstance(drop_path, list) else drop_path,
                 norm_layer=norm_layer, tome_r=tome_r, layer_scale_init_value=layer_scale_init_value,
-                use_coords=(i == 0),  # Use coordinates in the first layer, switch after
-                last_n_features=last_n_features)  # Use the last N features after the first layer
+                use_coords=(i == 0), last_n_features=last_n_features)
             for i in range(depth)])
 
-    def forward(self, x, coords):
+    def forward(self, x, coords, lens):
         for blk in self.blocks:
-            x = blk(x, coords)
+            x = blk(x, coords, lens)
         return x
 
 class BrainNAT(nn.Module):
-    def __init__(self, in_chans=1, embed_dim=96, pos_embed_dim=96, depth=4, num_heads=8, num_neighbors=5,
+    def __init__(self, in_chans=1, embed_dim=96, depth=4, num_heads=8, num_neighbors=5,
                  mlp_ratio=4., qkv_bias=True, drop_rate=0., attn_drop_rate=0., drop_path_rate=0.2,
                  norm_layer=nn.LayerNorm, tome_r=0, layer_scale_init_value=1e-6, coord_dim=3, omega_0=30,last_n_features=16):
         super().__init__()
         self.embed_dim = 2 ** int(torch.log2(torch.tensor(embed_dim)).ceil().item())
-        self.pos_embed_dim = pos_embed_dim
-        self.total_embed_dim = self.embed_dim + self.pos_embed_dim
-        self.num_features = self.total_embed_dim
+        self.pos_embed_dim = embed_dim
+        self.total_embed_dim = self.embed_dim 
+        self.num_features = self.embed_dim
         self.embed_layer = ConvTokenizer1D(in_chans=in_chans, embed_dim=self.embed_dim, norm_layer=norm_layer)
         self.pos_drop = nn.Dropout(p=drop_rate)
         
-        # Positional Embedding using SIREN
         self.pos_embed = SirenPositionalEmbedding(in_features=coord_dim, out_features=self.pos_embed_dim, omega_0=omega_0)
         
         dpr = [x.item() for x in torch.linspace(0, drop_path_rate, depth)]
         self.blocks = BrainNATBlock(
-            dim=self.total_embed_dim,  # Update dim to total_embed_dim
+            dim=self.total_embed_dim,
             depth=depth, num_heads=num_heads, num_neighbors=num_neighbors,
             mlp_ratio=mlp_ratio, qkv_bias=qkv_bias, drop=drop_rate,
             attn_drop=attn_drop_rate, drop_path=dpr, norm_layer=norm_layer, tome_r=tome_r,
             layer_scale_init_value=layer_scale_init_value,last_n_features=last_n_features)
         self.norm = norm_layer(self.total_embed_dim)
-        self.head = nn.Linear(self.total_embed_dim, self.embed_dim)  # Map back to embed_dim
+        self.head = nn.Linear(self.total_embed_dim, self.embed_dim)
         self.apply(self._init_weights)
 
     def _init_weights(self, m):
@@ -148,30 +141,35 @@ class BrainNAT(nn.Module):
             nn.init.constant_(m.bias, 0)
             nn.init.constant_(m.weight, 1.0)
 
-    def forward_features(self, x, coords):
-        x = self.embed_layer(x)  # x shape: [batch_size, num_tokens, embed_dim]
+    def forward_features(self, x, coords, lens):
+        # Pack sequences
+        # x_packed = pack_padded_sequence(x, lens, batch_first=True, enforce_sorted=False)
+        x = self.embed_layer(x)  # Pack sequences
+        # x, _ = pad_packed_sequence(x_packed, batch_first=True)
+
         x = self.pos_drop(x)
         
-        # Compute positional embeddings
-        pos_embeds = self.pos_embed(coords)  # shape: [num_tokens, pos_embed_dim]
-        # pos_embeds = pos_embeds.unsqueeze(0)  # Expand to match batch size
+        pos_embeds = self.pos_embed(coords)
+        # x = torch.cat([x, pos_embeds], dim=-1)
+        x = x + pos_embeds
         
-        # Concatenate positional embeddings to the token embeddings
-        x = torch.cat([x, pos_embeds], dim=-1)  # x shape: [batch_size, num_tokens, total_embed_dim]
-        
-        x = self.blocks(x, coords)
+        x = self.blocks(x, coords, lens)
         x = self.norm(x)
         return x
 
-    def forward(self, x, coords):
-        x = self.forward_features(x, coords)
+    def forward(self, x, coords, lens):
+        x = self.forward_features(x, coords, lens)
         x = self.head(x)
         return x
 
 # Example usage
+# Example usage
 if __name__ == "__main__":
     import numpy as np
     import nibabel as nib
+    import torch
+    import torch.nn as nn
+    from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 
     def count_params(model):
         total = sum(p.numel() for p in model.parameters())
@@ -180,26 +178,38 @@ if __name__ == "__main__":
         return trainable
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    
+    # Loading fMRI scans and masks for two subjects
     subj = 1
-    fmri_scan = nib.load(f'/scratch/cl6707/Shared_Datasets/NSD/nsddata/ppdata/subj0{subj}/func1pt8mm/valid_session01.nii.gz')
-    nsdgeneral_roi_mask = nib.load(f'/scratch/cl6707/Shared_Datasets/NSD/nsddata/ppdata/subj0{subj}/func1pt8mm/roi/nsdgeneral.nii.gz').get_fdata() == 1
-    input_scan = fmri_scan.get_fdata()[nsdgeneral_roi_mask].reshape(-1,1)
-    num_voxels = np.prod(fmri_scan.shape)
+    fmri_scan_1 = nib.load(f'/scratch/cl6707/Shared_Datasets/NSD/nsddata/ppdata/subj01/func1pt8mm/valid_session01.nii.gz')
+    fmri_scan_2 = nib.load(f'/scratch/cl6707/Shared_Datasets/NSD/nsddata/ppdata/subj02/func1pt8mm/valid_session01.nii.gz')
+    
+    nsdgeneral_roi_mask_1 = nib.load(f'/scratch/cl6707/Shared_Datasets/NSD/nsddata/ppdata/subj01/func1pt8mm/roi/nsdgeneral.nii.gz').get_fdata() == 1
+    nsdgeneral_roi_mask_2 = nib.load(f'/scratch/cl6707/Shared_Datasets/NSD/nsddata/ppdata/subj02/func1pt8mm/roi/nsdgeneral.nii.gz').get_fdata() == 1
 
-    visual_cortex_mask = torch.tensor(nsdgeneral_roi_mask, dtype=torch.bool, device=device)
-    coords = torch.nonzero(visual_cortex_mask, as_tuple=False).float().to(device)
-    # set it to the batch size
-    coord_dim = coords.shape[-1]
+    # Extracting voxel data for both scans
+    input_scan_1 = fmri_scan_1.get_fdata()[nsdgeneral_roi_mask_1]
+    input_scan_2 = fmri_scan_2.get_fdata()[nsdgeneral_roi_mask_2]
+
+    # Create visual cortex mask and coordinates tensor
+    visual_cortex_mask_1 = torch.tensor(nsdgeneral_roi_mask_1, dtype=torch.bool, device=device).cpu()
+    coords_1 = torch.nonzero(visual_cortex_mask_1, as_tuple=False).float().numpy()
+    
+    visual_cortex_mask_2 = torch.tensor(nsdgeneral_roi_mask_2, dtype=torch.bool, device=device).cpu()
+    coords_2 = torch.nonzero(visual_cortex_mask_2, as_tuple=False).float().numpy()
+
+    # Set up batch size and coordinate dimension
+    coord_dim = coords_1.shape[-1]
 
     # Initialize the model with adjusted dimensions
     embed_dim = 128
-    pos_embed_dim = 128  # Ensure that total_embed_dim is divisible by num_heads
+    # pos_embed_dim = 128  # Ensure that total_embed_dim is divisible by num_heads
     num_heads = 8  # Ensure total_embed_dim % num_heads == 0
 
     model = BrainNAT(
         in_chans=1,
         embed_dim=embed_dim,
-        pos_embed_dim=pos_embed_dim,
+        # pos_embed_dim=pos_embed_dim,
         depth=4,
         num_heads=num_heads,
         num_neighbors=8,
@@ -207,25 +217,42 @@ if __name__ == "__main__":
         layer_scale_init_value=1e-6,
         coord_dim=coord_dim,
         omega_0=30,
-        last_n_features=16 # Use the last 16 features used for find nearest neighbors, should be less than embed_dim at least
+        last_n_features=16 # Use the last 16 features for neighborhood attention
     ).to(device)
 
     print("Number of parameters:", count_params(model))
     model.train()
 
-    # Create dummy input
+    # Create input tensor for the batch
     batch_size = 2
-    coords = coords.unsqueeze(0).repeat(batch_size, 1, 1)
-    sequence_length = visual_cortex_mask.sum().item()
-    print("Sequence length:", sequence_length)
-    x = torch.randn(batch_size, 1, sequence_length, device=device)
-    print("Input shape:", x.shape)
-
+    # pad the input scans to the same length
+    max_len = max(input_scan_1.shape[0], input_scan_2.shape[0])
+    input_scan_1 = np.pad(input_scan_1, ((0, max_len - input_scan_1.shape[0])), mode='constant')
+    input_scan_2 = np.pad(input_scan_2, ((0, max_len - input_scan_2.shape[0])), mode='constant')
+    coords_1 = np.pad(coords_1, ((0, max_len - coords_1.shape[0]), (0, 0)), mode='constant')
+    coords_2 = np.pad(coords_2, ((0, max_len - coords_2.shape[0]), (0, 0)), mode='constant')
+    coords_1 = torch.tensor(coords_1, dtype=torch.float32, device=device)
+    coords_2 = torch.tensor(coords_2, dtype=torch.float32, device=device)
+    coords = torch.stack([coords_1, coords_2], dim=0).to(device)
+    
+    
+    input_scan_1 = torch.tensor(input_scan_1, dtype=torch.float32, device=device).unsqueeze(0)  # Add batch dimension
+    input_scan_2 = torch.tensor(input_scan_2, dtype=torch.float32, device=device).unsqueeze(0)  # Add batch dimension
+    # pad the input scans to the same length
+    # input_scan_1 = input_scan_1.repeat(batch_size, 1, 1)
+    # input_scan_2 = input_scan_2.repeat(batch_size, 1, 1)
+    
+    # Dummy input tensor for batch of two subjects
+    x = torch.cat([input_scan_1, input_scan_2], dim=0).unsqueeze(1)
+    
+    # Lengths of the input sequences in the batch (for packing)
+    lens = torch.tensor([input_scan_1.size(1), input_scan_2.size(1)], dtype=torch.long, device=device)
+    
     # Forward pass
-    output = model(x, coords)
+    output = model(x, coords, lens)
     print("Output shape:", output.shape)
 
-    # Create a virtual target
+    # Create a virtual target tensor of the same shape as the output
     y = torch.randn(output.shape, device=device)
 
     # Compute the loss
