@@ -1,3 +1,4 @@
+import nibabel as nib
 import torch
 import numpy as np
 import random
@@ -13,8 +14,14 @@ class MindEye2Dataset(Dataset):
         self.dataset, subj_list = load_web_dataset(args, split)
         self.voxels, self.num_voxels = load_voxels(args, subj_list, data_type)
         self.images = load_images(args)
-
         self.samples = list(iter(self.dataset))
+        self.coords = {}
+        for subj in subj_list:
+            # f = h5py.File(f'/scratch/cl6707/Shared_Datasets/NSD/nsddata/ppdata/subj0{subj}/func1pt8mm/roi', 'r')
+            mask =  nib.load(f'/scratch/cl6707/Shared_Datasets/NSD/nsddata/ppdata/subj0{subj}/func1pt8mm/roi/nsdgeneral.nii.gz').get_fdata() == 1
+            mask = torch.tensor(mask, dtype=torch.bool, device=device)
+            coords = torch.nonzero(mask, as_tuple=False).float().to(device)
+            self.coords[f'subj0{subj}'] = coords
     
     def __len__(self):
         return len(self.samples)
@@ -24,8 +31,9 @@ class MindEye2Dataset(Dataset):
         image_id = int(behav0[0,0])
         voxel_id = int(behav0[0,5])
         subj_id = int(subj_id)
+        coord = self.coords[f'subj0{subj_id}']
 
-        return self.images[image_id], self.voxels[f'subj0{subj_id}'][voxel_id].view(1,-1), subj_id
+        return self.images[image_id], self.voxels[f'subj0{subj_id}'][voxel_id].view(1,-1), subj_id, coord
 
 def my_split_by_node(urls): return urls
 
