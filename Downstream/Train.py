@@ -20,6 +20,8 @@ from accelerate import Accelerator
 import kornia
 from kornia.augmentation.container import AugmentationSequential
 # Add the path for SDXL unCLIP requirements
+sys.path.append('../')
+from backbone import BrainNAT
 sys.path.append('generative_models/')
 import sgm
 from generative_models.sgm.modules.encoders.modules import FrozenOpenCLIPImageEmbedder  # bigG embedder
@@ -30,7 +32,7 @@ torch.backends.cuda.matmul.allow_tf32 = True
 # Custom utility functions
 import utils
 from utils import save_ckpt
-
+from dataset import MindEye2Dataset, SubjectBatchSampler, custom_collate_fn
 import re
 
 from IPython import embed
@@ -68,7 +70,7 @@ def parse_arguments():
         help="Whether to train diffusion prior (True) or just rely on retrieval part of the pipeline (False)",
     )
     parser.add_argument(
-        "--batch_size", type=int, default=8,
+        "--batch_size", type=int, default=4,
         help="Batch size can be increased by 10x if only training retrieval submodule and not diffusion prior",
     )
     parser.add_argument(
@@ -149,102 +151,18 @@ def parse_arguments():
 
 
 def prepare_data(args, data_type):
-    # TODO: nsdgeneral masks are also needed for each subject. We need them as the guidance for the NAT.
-    def my_split_by_node(urls): return urls
-    num_voxels_list = []
+    train_data = MindEye2Dataset(args, data_type, 'train')
+    train_sampler = SubjectBatchSampler(train_data, args.batch_size)
+    train_dl = torch.utils.data.DataLoader(train_data, batch_sampler=train_sampler, collate_fn=custom_collate_fn, num_workers=8, pin_memory=True)
 
-    if args.multi_subject:
-        subj_list = np.arange(1,9)
-        subj_list = subj_list[subj_list != subj]
-        nsessions_allsubj = np.array([40, 40, 32, 30, 40, 32, 40, 30])
-        num_samples_per_epoch = (750 * 40 * 7) // args.batch_size
-    else:
-        subj_list = [args.subj]
-        num_samples_per_epoch = (750 * args.num_sessions) // args.batch_size
+    test_data = MindEye2Dataset(args, data_type, 'test')
+    test_sampler = SubjectBatchSampler(test_data, len(test_data))
+    test_dl = torch.utils.data.DataLoader(test_data, batch_sampler=test_sampler, collate_fn=custom_collate_fn, num_workers=8, pin_memory=True)
 
-    num_iterations_per_epoch = num_samples_per_epoch // args.batch_size
-    print("batch_size =", args.batch_size, "num_iterations_per_epoch =", num_iterations_per_epoch,
-        "num_samples_per_epoch =", num_samples_per_epoch)
+    num_iterations_per_epoch = len(train_data) // args.batch_size
+    return train_dl, test_dl, len(test_data), num_iterations_per_epoch
 
-    train_data_list = []
-    num_voxels = {}
-    voxels = {}
-
-    if args.multi_subject:
-        train_urls = [
-            f"{args.data_path}/wds/subj0{s}/train/{i}.tar"
-            for s in subj_list
-            for i in range(nsessions_allsubj[s - 1])
-        ]
-        random.shuffle(train_urls)
-    else:
-        train_urls = f"{args.data_path}/wds/subj0{args.subj}/train/" + "{0.." + f"{args.num_sessions - 1}" + "}.tar"
-
-    subject_pattern = re.compile(r"/subj0(\d+)/")
-
-    def add_subject(sample):
-        match = subject_pattern.search(sample["__url__"])
-        if match:
-            sample["subject_id"] = int(match.group(1))
-        return sample
-
-    train_data = (
-        wds.WebDataset(train_urls, resampled=False, nodesplitter=my_split_by_node)
-        .shuffle(1500, initial=1500, rng=random.Random(42))
-        .decode("torch")
-        .rename(behav="behav.npy", past_behav="past_behav.npy", future_behav="future_behav.npy", olds_behav="olds_behav.npy")
-        .map(add_subject)
-        .to_tuple("behav", "past_behav", "future_behav", "olds_behav", "subject_id")
-    )
-
-    train_dl = torch.utils.data.DataLoader(train_data, batch_size=args.batch_size, shuffle=False, drop_last=False, pin_memory=True)
-
-    for s in subj_list:
-        f = h5py.File(f'{args.data_path}/betas_all_subj0{s}_fp32_renorm.hdf5', 'r')
-        betas = f['betas'][:]
-        betas = torch.Tensor(betas).to("cpu").to(data_type)
-        num_voxels_list.append(betas[0].shape[-1])
-        num_voxels[f'subj0{s}'] = betas[0].shape[-1]
-        voxels[f'subj0{s}'] = betas
-        print(f"num_voxels for subj0{s}: {num_voxels[f'subj0{s}']}")
-
-    print("Loaded all subject train loaders and betas!\n")
-
-    # Validate only on one subject
-    subj = args.subj
-    if not args.new_test:  # using old test set
-        num_test_mapping = {3: 2113, 4: 1985, 6: 2113, 8: 1985}
-        num_test = num_test_mapping.get(subj, 2770)
-        test_url = f"{args.data_path}/wds/subj0{subj}/test/" + "0.tar"
-    else:  # using larger test set
-        num_test_mapping = {3: 2371, 4: 2188, 6: 2371, 8: 2188}
-        num_test = num_test_mapping.get(subj, 3000)
-        test_url = f"{args.data_path}/wds/subj0{subj}/new_test/" + "0.tar"
-
-    print(test_url)
-    test_data = (
-        wds.WebDataset(test_url, resampled=False, nodesplitter=my_split_by_node)
-        .shuffle(1500, initial=1500, rng=random.Random(42))
-        .decode("torch")
-        .rename(behav="behav.npy", past_behav="past_behav.npy", future_behav="future_behav.npy", olds_behav="olds_behav.npy")
-        .map(add_subject)
-        .to_tuple("behav", "past_behav", "future_behav", "olds_behav", "subject_id")
-    )
-    test_dl = torch.utils.data.DataLoader(test_data, batch_size=num_test, shuffle=False, drop_last=True,
-                                        pin_memory=True)
-    print(f"Loaded test loader for subj0{subj}!\n")
-
-    # Load all 73k NSD images
-    f = h5py.File(f'{args.data_path}/coco_images_224_float16.hdf5', 'r')
-    images = f['images']
-    print("Loaded all 73k possible NSD images to CPU!", images.shape)
-
-    return train_dl, test_dl, images, num_voxels_list, num_iterations_per_epoch, num_samples_per_epoch, num_test, voxels, num_voxels
-
-
-
-
-def build_model(args, device, data_type, num_voxels_list):
+def build_model(args, device, data_type):
     clip_img_embedder = FrozenOpenCLIPImageEmbedder(
         arch="ViT-bigG-14",
         version="laion2b_s39b_b160k",
@@ -302,24 +220,23 @@ def build_model(args, device, data_type, num_voxels_list):
             return x
 
     model = MindEyeModule()
-    # ------------------ Backbone Part ------------------
-    # TODO: Replace RidgeRegression+MLP to our Backbone
-    class RidgeRegression(torch.nn.Module):
-        # Make sure to add weight_decay when initializing optimizer to enable regularization
-        def __init__(self, input_sizes, out_features):
-            super(RidgeRegression, self).__init__()
-            self.out_features = out_features
-            self.linears = torch.nn.ModuleList([
-                torch.nn.Linear(input_size, out_features) for input_size in input_sizes
-            ])
-
-        def forward(self, x, subj_idx):
-            out = self.linears[subj_idx](x[:, 0]).unsqueeze(1)
-            return out
-
+    
+    # NAT backbone feture extractor
+    # TODO: test hyperparameters
     hidden_dim = args.hidden_dim
-    model.ridge = RidgeRegression(num_voxels_list, out_features=hidden_dim)
-    utils.count_params(model.ridge)
+    model.nat = BrainNAT(
+        in_chans=1,
+        embed_dim=hidden_dim,
+        depth=2,
+        num_heads=2,
+        num_neighbors=8,
+        tome_r=2000,
+        layer_scale_init_value=1e-6,
+        coord_dim=3,
+        omega_0=30,
+        last_n_features=16
+    )
+    utils.count_params(model.nat)
     utils.count_params(model)
 
     from models import BrainNetwork
@@ -368,7 +285,10 @@ def setup_optimizer(args, model, num_iterations_per_epoch):
     max_lr = args.max_lr
 
     opt_grouped_parameters = [
-        {'params': [p for n, p in model.ridge.named_parameters()], 'weight_decay': 1e-2},
+        {'params': [p for n, p in model.nat.named_parameters() if not any(nd in n for nd in no_decay)],
+             'weight_decay': 1e-2},
+        {'params': [p for n, p in model.nat.named_parameters() if any(nd in n for nd in no_decay)],
+             'weight_decay': 0.0},
         {'params': [p for n, p in model.backbone.named_parameters() if not any(nd in n for nd in no_decay)],
          'weight_decay': 1e-2},
         {'params': [p for n, p in model.backbone.named_parameters() if any(nd in n for nd in no_decay)],
@@ -440,9 +360,9 @@ def setup_wandb(args, num_params, train_url, test_url):
     return wandb_log
 
 
-def train(args, model, train_dl, test_dl, images, accelerator, device, data_type, num_iterations_per_epoch,
+def train(args, model, train_dl, test_dl, accelerator, device, data_type, num_iterations_per_epoch,
           num_test, subj_list, clip_img_embedder, optimizer, lr_scheduler, wandb_log, autoenc, cnx, mean, std,
-          blur_augs, local_rank, voxels, num_voxels):
+          blur_augs, local_rank):
     epoch = 0
     losses, test_losses, lrs = [], [], []
     best_test_loss = 1e9
@@ -493,59 +413,29 @@ def train(args, model, train_dl, test_dl, images, accelerator, device, data_type
         blurry_pixcorr = 0.
         test_blurry_pixcorr = 0. # needs >.456 to beat low-level subj01 results in mindeye v1
 
-        # pre-load all batches for this epoch (it's MUCH faster to pre-load in bulk than to separate loading per batch)
-        voxel_iters = [] # empty dict because diff subjects have differing # of voxels
-        image_iters = torch.zeros(num_iterations_per_epoch, batch_size, 3, 224, 224).float()
-        annot_iters = []
-        perm_iters, betas_iters, select_iters = [], [], []
-        subj_idx_iters = []
-        with torch.cuda.amp.autocast(dtype=data_type):
-            iter = -1
-            for behav0, past_behav0, future_behav0, old_behav0, subj_idx in train_dl: 
-                # Load images to cpu from hdf5 (requires sorted indexing)
-                image_idx = behav0[:,0,0].cpu().long().numpy()
-                image0, image_sorted_idx = np.unique(image_idx, return_index=True)                
-                if len(image0) != len(image_idx): # hdf5 cant handle duplicate indexing
-                    continue
-                iter += 1
-                image0 = torch.tensor(images[image0], dtype=data_type)
-                image_iters[iter] = image0
-                
-                # Load voxels for current batch, matching above indexing
-                voxel_idx = behav0[:,0,5].cpu().long().numpy()
-                voxel_sorted_idx = voxel_idx[image_sorted_idx]
-
-                subj_idx = subj_idx.cpu().long().numpy()
-                subj_sorted_idx = subj_idx[image_sorted_idx]
-                subj_idx_iters.append(subj_sorted_idx)
-
-                max_voxel_len = np.max([num_voxels[f'subj0{s}'] for s in np.unique(subj_idx)])
-                voxel0 = torch.zeros((batch_size,1,max_voxel_len), dtype=data_type)
-
-                for i,s in enumerate(subj_sorted_idx):
-                    voxel = voxels[f'subj0{s}'][voxel_sorted_idx[i]]
-                    voxel0[i,0,:len(voxel)] = voxel
-
-                if epoch < int(mixup_pct * num_epochs):
-                    voxel0, perm, betas, select = utils.mixco(voxel0)
-                    perm_iters.append(perm)
-                    betas_iters.append(betas)
-                    select_iters.append(select)
-
-                voxel_iters.append(voxel0)
-
-                if iter >= num_iterations_per_epoch-1:
-                    break
-
-        # you now have voxel_iters and image_iters with num_iterations_per_epoch batches each
-        for train_i in range(num_iterations_per_epoch):
+        for train_i, (images, voxels, subj_idx, coords, image_idx) in enumerate(train_dl):
             with torch.cuda.amp.autocast(dtype=data_type):
                 optimizer.zero_grad()
                 loss=0.
 
-                voxel = voxel_iters[train_i].to(device)
-                image = image_iters[train_i].detach().to(device)
-                subj_idx = subj_idx_iters[train_i]
+                image = images.detach().to(device)
+                voxels = voxels.detach().to(device)
+                coords = coords.detach().to(device)
+
+                lens = torch.ones(voxels.shape[0], dtype=torch.long)*voxels.shape[-1]
+                lens = lens.detach().to(device)
+
+                image_idx = image_idx.cpu().long().numpy()
+                _, img_sorted_idx = np.unique(image_idx, return_index=True)
+                voxel0 = voxels[img_sorted_idx]
+                image = image[img_sorted_idx]
+                coords = coords[img_sorted_idx]
+
+                if epoch < int(mixup_pct * num_epochs):
+                    voxel0, perm, betas, select = utils.mixco(voxel0)
+                    perm = perm.detach().to(device)
+                    betas = betas.detach().to(device)
+                    select = select.detach().to(device)
 
                 if use_image_aug: 
                     image = img_augment(image)
@@ -553,17 +443,9 @@ def train(args, model, train_dl, test_dl, images, accelerator, device, data_type
                 clip_target = clip_img_embedder(image)
                 assert not torch.any(torch.isnan(clip_target))
 
-                if epoch < int(mixup_pct * num_epochs):
-                    perm = perm_iters[train_i].detach().to(device)
-                    betas = betas_iters[train_i].detach().to(device)
-                    select = select_iters[train_i].detach().to(device)
+                voxel_nat = model.nat(voxel0, coords, lens)
 
-                # TODO: replace model
-                # voxel_nat = model(voxel, subj_idx)
-                
-                voxel_ridge = torch.zeros((batch_size,1,args.hidden_dim)).float().to(device)
-
-                backbone, clip_voxels, blurry_image_enc_ = model.backbone(voxel_ridge)
+                backbone, clip_voxels, blurry_image_enc_ = model.backbone(voxel_nat)
                 if clip_scale>0:
                     clip_voxels_norm = nn.functional.normalize(clip_voxels.flatten(1), dim=-1)
                     clip_target_norm = nn.functional.normalize(clip_target.flatten(1), dim=-1)
@@ -646,27 +528,23 @@ def train(args, model, train_dl, test_dl, images, accelerator, device, data_type
                 if args.lr_scheduler_type is not None:
                     lr_scheduler.step()
 
+        embed()
         model.eval()
         if local_rank==0:
             with torch.no_grad(), torch.cuda.amp.autocast(dtype=data_type): 
-                for test_i, (behav, past_behav, future_behav, old_behav, subj_idx) in enumerate(test_dl):  
+                for test_i, (images, voxels, subj_idx, coords, image_idx) in enumerate(test_dl):  
                     # all test samples should be loaded per batch such that test_i should never exceed 0
-                    assert len(behav) == num_test
+                    assert images.shape[0] == num_test
 
                     ## Average same-image repeats ##
                     if test_image is None:
-                        max_voxel_len = np.max([num_voxels[f'subj0{s}'] for s in np.unique(subj_idx)])
-                        voxel = torch.zeros((num_test,1,max_voxel_len), dtype=data_type)
-                        for i,s in enumerate(subj_idx):
-                            voxel_ = voxels[f'subj0{s}'][behav[:,0,5].cpu().long()[i]]
-                            voxel[i,0,:len(voxel_)] = voxel_
-                        # voxel = voxels[f'subj0{subj}'][behav[:,0,5].cpu().long()].unsqueeze(1)
-                        
-                        image = behav[:,0,0].cpu().long()
+                        voxel = voxels
+                        image = image_idx
+                        lens = torch.ones(voxels.shape[0], dtype=torch.long)*voxels.shape[-1]
 
                         unique_image, sort_indices = torch.unique(image, return_inverse=True)
                         for im in unique_image:
-                            locs = torch.where(im == image)[0]
+                            locs = torch.where(im == image_idx)[0]
                             if len(locs)==1:
                                 locs = locs.repeat(3)
                             elif len(locs)==2:
@@ -675,6 +553,8 @@ def train(args, model, train_dl, test_dl, images, accelerator, device, data_type
                             if test_image is None:
                                 test_image = torch.Tensor(images[im][None])
                                 test_voxel = voxel[locs][None]
+                                test_coords = coords[locs][None]
+                                test_lens = lens[locs][None]
                             else:
                                 test_image = torch.vstack((test_image, torch.Tensor(images[im][None])))
                                 test_voxel = torch.vstack((test_voxel, voxel[locs][None]))
@@ -683,14 +563,15 @@ def train(args, model, train_dl, test_dl, images, accelerator, device, data_type
                                 
                     test_indices = torch.arange(len(test_voxel))[:300]
                     voxel = test_voxel[test_indices].to(device)
+                    coords = test_coords[test_indices].to(device)
+                    lens = test_lens[test_indices].to(device)
                     image = test_image[test_indices].to(device)
                     assert len(image) == 300
 
                     clip_target = clip_img_embedder(image.float())
 
                     for rep in range(3):
-                        # TODO: replace model
-                        voxel_ridge = torch.zeros((num_test,1,args.hidden_dim)).float().to(device)
+                        voxel_nat = model.nat(test_voxel, test_coords, test_lens)
                         
                         backbone0, clip_voxels0, blurry_image_enc_ = model.backbone(voxel_ridge)
                         if rep==0:
@@ -832,11 +713,9 @@ def main():
     else:
         img_augment = None
 
-    train_dl, test_dl, images, num_voxels_list, num_iterations_per_epoch, num_samples_per_epoch, num_test, voxels, num_voxels = prepare_data(
-        args, data_type)
+    train_dl, test_dl, num_test, num_iterations_per_epoch = prepare_data(args, data_type)
 
-    clip_img_embedder, model, autoenc, cnx, mean, std, blur_augs = build_model(args, device, data_type,
-                                                                               num_voxels_list)
+    clip_img_embedder, model, autoenc, cnx, mean, std, blur_augs = build_model(args, device, data_type)
 
     optimizer, lr_scheduler = setup_optimizer(args, model, num_iterations_per_epoch)
 
@@ -844,9 +723,9 @@ def main():
 
     wandb_log = setup_wandb(args, num_params, train_url="", test_url="")  # Update with actual URLs if needed
 
-    train(args, model, train_dl, test_dl, images, accelerator, device, data_type, num_iterations_per_epoch,
+    train(args, model, train_dl, test_dl, accelerator, device, data_type, num_iterations_per_epoch,
           num_test, [args.subj], clip_img_embedder, optimizer, lr_scheduler, wandb_log, autoenc, cnx, mean, std,
-          blur_augs, local_rank, voxels, num_voxels)
+          blur_augs, local_rank)
 
 
 if __name__ == "__main__":

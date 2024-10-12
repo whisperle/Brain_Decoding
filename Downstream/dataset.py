@@ -5,12 +5,14 @@ import random
 import h5py
 import re
 import webdataset as wds
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, Sampler
+from collections import defaultdict
 
 from IPython import embed
 
 class MindEye2Dataset(Dataset):
     def __init__(self, args, data_type, split='train'):
+        self.data_type = data_type
         self.dataset, subj_list = load_web_dataset(args, split)
         self.voxels, self.num_voxels = load_voxels(args, subj_list, data_type)
         self.images = load_images(args)
@@ -32,7 +34,39 @@ class MindEye2Dataset(Dataset):
         subj_id = int(subj_id)
         coord = self.coords[f'subj0{subj_id}']
 
-        return self.images[image_id], self.voxels[f'subj0{subj_id}'][voxel_id].view(1,-1), subj_id, coord
+        return torch.tensor(self.images[image_id],dtype=self.data_type), self.voxels[f'subj0{subj_id}'][voxel_id].view(1,-1), subj_id, coord, image_id
+
+class SubjectBatchSampler(Sampler):
+    def __init__(self, dataset, batch_size):
+        self.dataset = dataset
+        self.batch_size = batch_size
+        self.batches = []
+        self.create_batches()
+
+    def create_batches(self):
+        subject_to_indices = defaultdict(list)
+
+        for idx, sample in enumerate(self.dataset.samples):
+            subj_id = int(sample[-1])
+            subject_to_indices[subj_id].append(idx)
+
+        batches = []
+        for indices in subject_to_indices.values():
+            random.shuffle(indices)
+            for i in range(0, len(indices), self.batch_size):
+                batch = indices[i:i + self.batch_size]
+                batches.append(batch)
+
+        random.shuffle(batches)
+        self.batches = batches
+
+    def __iter__(self):
+        self.create_batches()
+        for batch in self.batches:
+            yield batch
+
+    def __len__(self):
+        return len(self.batches)
 
 def my_split_by_node(urls): return urls
 
@@ -99,45 +133,23 @@ def load_images(args):
     images = f['images']
     return images
 
-def pad_collate_fn(batch):
-    images, voxels, subj_idx, coords = zip(*batch)
-    
-    max_voxel_length = max(item.shape[1] for item in voxels)
-    padded_voxels = [
-        torch.nn.functional.pad(item, (0, max_voxel_length - item.shape[1]))
-        for item in voxels
-    ]
-    padded_voxels = torch.stack(padded_voxels, dim=0)
-    
-    max_coord_length = max(item.shape[0] for item in coords)
-    padded_coords = [
-        torch.nn.functional.pad(item, (0, 0, 0, max_coord_length - item.shape[0]))
-        for item in coords
-    ]
-    padded_coords = torch.stack(padded_coords, dim=0)
+def custom_collate_fn(batch):
+    images, voxels, subjects, coords, image_idx = zip(*batch)
+    images = torch.stack(images, dim=0)
+    voxels = torch.stack(voxels, dim=0)
+    subjects = torch.tensor(subjects)
+    coords = torch.stack(coords, dim=0)
+    image_idx = torch.tensor(image_idx)
 
-    return images, padded_voxels, subj_idx, padded_coords
+    return images, voxels, subjects, coords, image_idx
 
-# if __name__ == "__main__":
-#     from Train import parse_arguments
-#     args = parse_arguments()
-#     data_type = torch.float16
+if __name__ == "__main__":
+    from Train import parse_arguments
+    args = parse_arguments()
+    data_type = torch.float16
 
-#     train_data = MindEye2Dataset(args, data_type, 'train')
-#     test_data = MindEye2Dataset(args, data_type, 'test')
+    batch_size = 32
 
-#     train_dl = DataLoader(
-#         train_data, 
-#         batch_size=32,
-#         shuffle=True,
-#         num_workers=8,
-#         collate_fn=pad_collate_fn
-#     )
-
-#     test_dl = DataLoader(
-#         test_data, 
-#         batch_size=32,
-#         shuffle=True,
-#         num_workers=8,
-#         collate_fn=pad_collate_fn
-#     )
+    train_data = MindEye2Dataset(args, data_type, 'train')
+    sampler = SubjectBatchSampler(train_data, batch_size)
+    dataloader = DataLoader(train_data, batch_sampler=sampler, collate_fn=custom_collate_fn, num_workers=8, pin_memory=True)
