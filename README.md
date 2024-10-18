@@ -95,6 +95,7 @@ Example (if you want GPU), if you only need CPU, remove the line `#SBATCH --gres
 #SBATCH --mem=24GB
 #SBATCH --time=4:00:00
 #SBATCH --gres=gpu:1
+#SBATCH --account=pr_60_tandon_advanced
 
 
 module purge
@@ -197,6 +198,7 @@ done </scratch/cleanup/60days-files/20230701/xc1490
 #SBATCH --mem=36GB
 #SBATCH --time=24:59:00
 #SBATCH --gres=gpu:1
+#SBATCH --account=pr_60_tandon_advanced
 overlay_ext3=/home/xc1490/home/apps/ddsp.ext3
 singularity exec --nv \
   --overlay ${overlay_ext3}:ro \
@@ -204,7 +206,7 @@ singularity exec --nv \
   /bin/bash -c "
 source /ext3/env.sh
 cd /scratch/xc1490/projects/ecog/SSL/Medical_SSL/bin_swap_pretrain
-python train_formant_e_production_0328.py --OUTPUT_DIR /scratch/xc1490/projects/ecog/SSL/Medical_SSL/output/ECoG_SwapVAE_ResNet_03182300_LD_epoch_200_causal_0_extend_grid_0_use_denoise_0_use_stoi_0_multipro_rdr_0.1_train_NY869_test_NY869_region_index_0_maplay_0_mulsca_0_task__bs_20_ldw_1_alphaw_1_consw_0_ind_0              --rdropout 0.1 --trainsubject NY869 --testsubject NY869 --region_index 0 --mapping_layers 0 --multiscale 0             --param_file train_param_e2a_production.json --batch_size 20 --MAPPING_FROM_ECOG ECoG_SwapVAE_ResNet --ld_loss_weight 1 --alpha_loss_weight 1             --consonant_loss_weight 0 --RNN_LAYERS 0 --reshape 1 --DENSITY "LD" --HIDDEN_DIM 256 --wavebased 1 --bgnoise_fromdata 1             --ignore_loading 0 --finetune 1 --learnedmask 1 --dynamicfiltershape 0 --n_filter_samples 80 --n_fft 512 --formant_supervision 1 --reverse_order 1 --lar_cap 0 --intensity_thres -1 --pitch_supervision 0 --epoch_num 200 --pretrained_model_dir None --causal 0 --use_stoi 0 --FAKE_LD 0 --use_denoise 0 --extend_grid 0 --causal 0 --occlusion 0
+python train.py --params
   ```
 ## Slurm commands:
 
@@ -225,53 +227,6 @@ scancel -u [net id] -t [Job status:e.g. PD] # cancel jobs with specific status
 scontrol show job [job id] # show job details
 ```
 
-## To Generate Sbatch Files in Batch, refer to './notebooks':
-* [swapDecodingJobs.ipynb](./notebooks/swapDecodingJobs.ipynb): Used for generating decoding jobs
-* [swapVAE_Pretrain_Jobs.ipynb](./notebooks/swapVAE_Pretrain_Jobs.ipynb): Used for generating pretraining jobs
-
 ## Shared Data Folder
 
-`/scratch/xc1490/ECoG_Shared_Data`
-
-We have:
-
-- subjects original data `subjects`
-- processed meta data in h5 `LD_data_extracted`
-- preprocessing code `preprocess_code`
-- a2a pretrained model `demo`
-
-
-<!-- ##### 0326 updates
-- save latent
-- fix save result mistake, change to save `x1_recon_ori`
-- ablation of:
-    - hidden_dim
-    - s_dim, l_dim
-    - upsample
-    - activation
-    - losses
-- VAE
-- temporal VAE
-- temporal SWAPVAE
-
-
-
----
-
-- TODO
-- [ ] save latent
-- [ ] modify all the dimensions appropriately
-- [ ] multi-scale connection?
-- [ ] ablation of pure VAE
-- [ ] ablation  of VAE with temporal latent
-- [ ] ViT as encoder decoder
-    - [ ] segformer, vit encoder and light decoder
-- [ ] latent dim, hidden dim
-- [ ] balance the weight
-- [ ] activation function
-- [ ] transformation combination
-- [ ] transformation probability
-- [ ] add onstage
-- [ ] distribution label in loss, poisson?
-- [ ] latent dimension
-- [ ] temporal jittering, create pairs from two trials with same word, instead of from single trial -->
+`/scratch/cl6707/Shared_Datasets/NSD_Mindeye`
