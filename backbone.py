@@ -1,7 +1,6 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 from timm.models.layers import DropPath
 from atten_flex_customize import NearestNeighborAttention
 from tome_customize import TokenMerging
@@ -77,12 +76,12 @@ class BrainNATLayer(nn.Module):
         self.use_coords = use_coords
         self.last_n_features = last_n_features
 
-    def forward(self, x, coords, lens):
+    def forward(self, x, coords):
         if self.use_coords:
-            x_attn, metric = self.attn(self.norm1(x), coords, lens)
+            x_attn, metric = self.attn(self.norm1(x), coords)
         else:
             last_n_features = x[:, :, -self.last_n_features:]
-            x_attn, metric = self.attn(self.norm1(x), last_n_features, lens)
+            x_attn, metric = self.attn(self.norm1(x), last_n_features)
         
         x = x + self.drop_path(self.gamma_1 * x_attn)
         x = self.token_merging(x, metric)
@@ -102,15 +101,15 @@ class BrainNATBlock(nn.Module):
                 use_coords=(i == 0), last_n_features=last_n_features)
             for i in range(depth)])
 
-    def forward(self, x, coords, lens):
+    def forward(self, x, coords):
         for blk in self.blocks:
-            x = blk(x, coords, lens)
+            x = blk(x, coords)
         return x
 
 class BrainNAT(nn.Module):
     def __init__(self, in_chans=1, embed_dim=96, depth=4, num_heads=8, num_neighbors=5,
                  mlp_ratio=4., qkv_bias=True, drop_rate=0., attn_drop_rate=0., drop_path_rate=0.2,
-                 norm_layer=nn.LayerNorm, tome_r=0, layer_scale_init_value=1e-6, coord_dim=3, omega_0=30,last_n_features=16):
+                 norm_layer=nn.LayerNorm, tome_r=0, layer_scale_init_value=1e-6, coord_dim=3, omega_0=30, last_n_features=16):
         super().__init__()
         self.embed_dim = 2 ** int(torch.log2(torch.tensor(embed_dim)).ceil().item())
         self.pos_embed_dim = embed_dim
@@ -127,7 +126,7 @@ class BrainNAT(nn.Module):
             depth=depth, num_heads=num_heads, num_neighbors=num_neighbors,
             mlp_ratio=mlp_ratio, qkv_bias=qkv_bias, drop=drop_rate,
             attn_drop=attn_drop_rate, drop_path=dpr, norm_layer=norm_layer, tome_r=tome_r,
-            layer_scale_init_value=layer_scale_init_value,last_n_features=last_n_features)
+            layer_scale_init_value=layer_scale_init_value, last_n_features=last_n_features)
         self.norm = norm_layer(self.total_embed_dim)
         self.head = nn.Linear(self.total_embed_dim, self.embed_dim)
         self.apply(self._init_weights)
@@ -141,28 +140,23 @@ class BrainNAT(nn.Module):
             nn.init.constant_(m.bias, 0)
             nn.init.constant_(m.weight, 1.0)
 
-    def forward_features(self, x, coords, lens):
-        # Pack sequences
-        # x_packed = pack_padded_sequence(x, lens, batch_first=True, enforce_sorted=False)
-        x = self.embed_layer(x)  # Pack sequences
-        # x, _ = pad_packed_sequence(x_packed, batch_first=True)
+    def forward_features(self, x, coords):
+        x = self.embed_layer(x)  
 
         x = self.pos_drop(x)
         
         pos_embeds = self.pos_embed(coords)
-        # x = torch.cat([x, pos_embeds], dim=-1)
         x = x + pos_embeds
         
-        x = self.blocks(x, coords, lens)
+        x = self.blocks(x, coords)
         x = self.norm(x)
         return x
 
-    def forward(self, x, coords, lens):
-        x = self.forward_features(x, coords, lens)
+    def forward(self, x, coords):
+        x = self.forward_features(x, coords)
         x = self.head(x)
         return x
 
-# Example usage
 # Example usage
 if __name__ == "__main__":
     import numpy as np

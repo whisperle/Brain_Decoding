@@ -20,6 +20,10 @@ class TokenMerging(nn.Module):
         }
 
     def forward(self, x: torch.Tensor, metric: torch.Tensor) -> torch.Tensor:
+        # Reset tome_info for each batch, if needed
+        self._tome_info["source"] = None
+        self._tome_info["size"] = None
+
         r = self._tome_info["r"]
         
         if r > 0:
@@ -33,7 +37,10 @@ class TokenMerging(nn.Module):
                 self._tome_info["source"] = merge_source(
                     merge, x, self._tome_info["source"]
                 )
-            x, self._tome_info["size"] = merge_wavg(
-                merge, x, self._tome_info["size"]
-            )
+            try:
+                x, self._tome_info["size"] = merge_wavg(
+                    merge, x, self._tome_info["size"]
+                )
+            except:
+                import pdb; pdb.set_trace()
         return x

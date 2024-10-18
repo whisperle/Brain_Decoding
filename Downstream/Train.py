@@ -221,14 +221,14 @@ def build_model(args, device, data_type):
 
     model = MindEyeModule()
     
-    # NAT backbone feture extractor
+    # NAT backbone feature extractor
     # TODO: test hyperparameters
-    hidden_dim = args.hidden_dim
+    hidden_dim_nat = args.hidden_dim//16 # 1024//4
     model.nat = BrainNAT(
         in_chans=1,
-        embed_dim=hidden_dim,
+        embed_dim=hidden_dim_nat,
         depth=2,
-        num_heads=2,
+        num_heads=4,
         num_neighbors=8,
         tome_r=2000,
         layer_scale_init_value=1e-6,
@@ -236,11 +236,12 @@ def build_model(args, device, data_type):
         omega_0=30,
         last_n_features=16
     )
-    utils.count_params(model.nat)
-    utils.count_params(model)
-
+    # Add Adapative Max Pooling to the NAT backbone to get a fixed size feature vector
+    pool_dim = 64
+    model.voxel_adaptor = nn.AdaptiveMaxPool1d(pool_dim) # todo: ablation on this
+    model.embed_linear = nn.Linear(hidden_dim_nat*pool_dim, args.hidden_dim)
     from models import BrainNetwork
-    model.backbone = BrainNetwork(h=hidden_dim, in_dim=hidden_dim, seq_len=1, n_blocks=args.n_blocks,
+    model.backbone = BrainNetwork(h=args.hidden_dim, in_dim=args.hidden_dim, seq_len=1, n_blocks=args.n_blocks,
                                   clip_size=clip_emb_dim, out_dim=clip_emb_dim * clip_seq_dim,
                                   blurry_recon=args.blurry_recon, clip_scale=args.clip_scale)
     utils.count_params(model.backbone)
@@ -414,7 +415,7 @@ def train(args, model, train_dl, test_dl, accelerator, device, data_type, num_it
         test_blurry_pixcorr = 0. # needs >.456 to beat low-level subj01 results in mindeye v1
 
         for train_i, (images, voxels, subj_idx, coords, image_idx) in enumerate(train_dl):
-            with torch.cuda.amp.autocast(dtype=data_type):
+            with torch.amp.autocast('cuda'):
                 optimizer.zero_grad()
                 loss=0.
 
@@ -442,9 +443,12 @@ def train(args, model, train_dl, test_dl, accelerator, device, data_type, num_it
 
                 clip_target = clip_img_embedder(image)
                 assert not torch.any(torch.isnan(clip_target))
-
-                voxel_nat = model.nat(voxel0, coords, lens)
-
+                voxel_nat = model.nat(voxel0, coords)
+                voxel_nat = voxel_nat.permute(0, 2, 1)
+                # Here I use adaptive max pooling to get a fixed size feature vector
+                # Need better way of doing this for variable length sequences
+                voxel_nat = model.voxel_adaptor(voxel_nat) 
+                voxel_nat = model.embed_linear(voxel_nat.flatten(1)).unsqueeze(1)
                 backbone, clip_voxels, blurry_image_enc_ = model.backbone(voxel_nat)
                 if clip_scale>0:
                     clip_voxels_norm = nn.functional.normalize(clip_voxels.flatten(1), dim=-1)
@@ -490,11 +494,10 @@ def train(args, model, train_dl, test_dl, accelerator, device, data_type, num_it
                         image_enc[select] = image_enc[select] * betas[select].reshape(*betas_shape) + \
                             image_enc_shuf[select] * (1 - betas[select]).reshape(*betas_shape)
 
-                    image_norm = (image - mean)/std
-                    image_aug = (blur_augs(image) - mean)/std
+                    image_norm = ((image - mean)/std)
+                    image_aug = (blur_augs(image.to(torch.float32)) - mean)/std
                     _, cnx_embeds = cnx(image_norm)
                     _, cnx_aug_embeds = cnx(image_aug)
-
                     cont_loss = utils.soft_cont_loss(
                         nn.functional.normalize(transformer_feats.reshape(-1, transformer_feats.shape[-1]), dim=-1),
                         nn.functional.normalize(cnx_embeds.reshape(-1, cnx_embeds.shape[-1]), dim=-1),
@@ -503,7 +506,7 @@ def train(args, model, train_dl, test_dl, accelerator, device, data_type, num_it
                     loss_blurry_cont_total += cont_loss.item()
 
                     loss += (loss_blurry + 0.1*cont_loss) * blur_scale #/.18215
-
+                        
                 if clip_scale>0:
                     # forward and backward top 1 accuracy        
                     labels = torch.arange(len(clip_voxels_norm)).to(clip_voxels_norm.device) 
@@ -513,11 +516,11 @@ def train(args, model, train_dl, test_dl, accelerator, device, data_type, num_it
                 if blurry_recon:
                     with torch.no_grad():
                         # only doing pixcorr eval on a subset of the samples per batch because its costly & slow to compute autoenc.decode()
-                        random_samps = np.random.choice(np.arange(len(image)), size=len(image)//5, replace=False)
+                        samp_size = len(image)//5 if len(image)>5 else len(image)
+                        random_samps = np.random.choice(np.arange(len(image)), size=samp_size, replace=False)
                         blurry_recon_images = (autoenc.decode(image_enc_pred[random_samps]/0.18215).sample/ 2 + 0.5).clamp(0,1)
                         pixcorr = utils.pixcorr(image[random_samps], blurry_recon_images)
                         blurry_pixcorr += pixcorr.item()
-
                 utils.check_loss(loss)
                 accelerator.backward(loss)
                 optimizer.step()

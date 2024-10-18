@@ -88,7 +88,6 @@ class BrainNetwork(nn.Module):
     def forward(self, x):
         # make empty tensors
         c,b = torch.Tensor([0.]), torch.Tensor([[0.],[0.]])
-        
         # Mixer blocks
         residual1 = x
         residual2 = x.permute(0,2,1)
