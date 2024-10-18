@@ -574,9 +574,13 @@ def train(args, model, train_dl, test_dl, accelerator, device, data_type, num_it
                     clip_target = clip_img_embedder(image.float())
 
                     for rep in range(3):
-                        voxel_nat = model.nat(test_voxel, test_coords, test_lens)
-                        
-                        backbone0, clip_voxels0, blurry_image_enc_ = model.backbone(voxel_ridge)
+                        voxel_nat = model.nat(voxel0, coords)
+                        voxel_nat = voxel_nat.permute(0, 2, 1)
+                        # Here I use adaptive max pooling to get a fixed size feature vector
+                        # Need better way of doing this for variable length sequences
+                        voxel_nat = model.voxel_adaptor(voxel_nat) 
+                        voxel_nat = model.embed_linear(voxel_nat.flatten(1)).unsqueeze(1)
+                        backbone, clip_voxels, blurry_image_enc_ = model.backbone(voxel_nat)
                         if rep==0:
                             clip_voxels = clip_voxels0
                             backbone = backbone0
