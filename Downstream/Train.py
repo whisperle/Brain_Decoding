@@ -287,37 +287,19 @@ def setup_optimizer(args, model, num_iterations_per_epoch):
     return optimizer, lr_scheduler
 
 
-def setup_wandb(args, num_params, train_url="", test_url=""):
+def setup_wandb(args,train_url="", test_url=""):
     local_rank = os.getenv('RANK', 0)
     wandb_log = args.wandb_log
 
     if int(local_rank) == 0 and wandb_log:
         import wandb
         print(f"wandb {args.wandb_project} run {args.model_name}")
-        wandb_config = {
-            "model_name": args.model_name,
-            "batch_size": args.batch_size,
-            "num_epochs": args.num_epochs,
-            "num_sessions": args.num_sessions,
-            "num_params": num_params,
-            "clip_scale": args.clip_scale,
-            "prior_scale": args.prior_scale,
-            "blur_scale": args.blur_scale,
-            "use_image_aug": args.use_image_aug,
-            "max_lr": args.max_lr,
-            "mixup_pct": args.mixup_pct,
-            "ckpt_interval": args.ckpt_interval,
-            "ckpt_saving": args.ckpt_saving,
-            "seed": args.seed,
-            # "train_url": train_url,
-            # "test_url": test_url,
-        }
         wandb.init(
             id=args.model_name,
             project=args.wandb_project,
             name=args.model_name,
-            config=wandb_config,
-            resume="allow",
+            config=vars(args),
+            resume="auto",
         )
     else:
         wandb_log = False
@@ -657,6 +639,8 @@ def train(args, model, train_dl, test_dl, accelerator, data_type, num_iterations
 def main():
     torch._dynamo.config.optimize_ddp=False
     args = parse_arguments()
+    wandb_log = setup_wandb(args)#,train_url="", test_url="")  # Update with actual URLs if needed
+    
     utils.seed_everything(args.seed)
     data_type = torch.float16  # Change depending on your mixed_precision
 
@@ -686,10 +670,6 @@ def main():
 
     clip_img_embedder, model, autoenc, cnx, mean, std, blur_augs = build_model(args, device, data_type)
     optimizer, lr_scheduler = setup_optimizer(args, model, num_iterations_per_epoch)
-
-    num_params = utils.count_params(model)
-
-    wandb_log = setup_wandb(args, num_params)#,train_url="", test_url="")  # Update with actual URLs if needed
 
     train(args, model, train_dl, test_dl, accelerator, data_type, num_iterations_per_epoch,
           num_test, [args.subj], clip_img_embedder, optimizer, lr_scheduler, wandb_log, autoenc, cnx, mean, std,
