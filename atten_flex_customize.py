@@ -67,31 +67,32 @@ class NearestNeighborAttention(nn.Module):
         )
 
     def forward(self, x, coords,**kwargs):
-        # x: [batch_size, seq_len, feature_dim]
-        # coords: [batch_size, seq_len, coord_dim]
+        with torch.amp.autocast('cuda'):
+            # x: [batch_size, seq_len, feature_dim]
+            # coords: [batch_size, seq_len, coord_dim]
 
-        batch_size, seq_len, _ = x.shape
-        
-        # Compute nearest neighbors
-        nearest_voxels = self._compute_nearest_neighbors(coords)
+            batch_size, seq_len, _ = x.shape
+            
+            # Compute nearest neighbors
+            nearest_voxels = self._compute_nearest_neighbors(coords)
 
-        # Create the attention mask
-        attention_mask = self._create_attention_mask(nearest_voxels)
+            # Create the attention mask
+            attention_mask = self._create_attention_mask(nearest_voxels)
+            
+            # Project input to query, key, and value
+            query = self.query_proj(x)
+            key = self.key_proj(x)
+            value = self.value_proj(x)
+            
+            # Reshape to [batch_size, num_heads, seq_len, head_dim]
+            query = query.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
+            key = key.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
+            value = value.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
+            
+            # Apply flex attention
+            output = flex_attention(query, key, value, block_mask=attention_mask)
+            # Compute the metric: the mean of the key vectors over the heads
+            metric = key.mean(1)  # Averaging over heads
         
-        # Project input to query, key, and value
-        query = self.query_proj(x)
-        key = self.key_proj(x)
-        value = self.value_proj(x)
-        
-        # Reshape to [batch_size, num_heads, seq_len, head_dim]
-        query = query.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
-        key = key.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
-        value = value.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
-        
-        # Apply flex attention
-        output = flex_attention(query, key, value, block_mask=attention_mask)
-        # Compute the metric: the mean of the key vectors over the heads
-        metric = key.mean(1)  # Averaging over heads
-        
-        # Reshape output and return
-        return output.transpose(1, 2).contiguous().view(batch_size, seq_len, self.feature_dim), metric
+            # Reshape output and return
+            return output.transpose(1, 2).contiguous().view(batch_size, seq_len, self.feature_dim), metric

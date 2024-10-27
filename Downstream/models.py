@@ -12,20 +12,28 @@ from tqdm import tqdm
 import utils
 
 from diffusers.models.vae import Decoder
+import sys
+sys.path.append('../')
+from backbone import BrainNAT
+
+
 class BrainNetwork(nn.Module):
-    def __init__(self, h=4096, in_dim=15724, out_dim=768, seq_len=2, n_blocks=4, drop=.15, clip_size=768, blurry_recon=True, clip_scale=1):
+    def __init__(self, h=4096, in_dim=15724, out_dim=768, seq_len=2, n_blocks=4, drop=.15, clip_size=768, blurry_recon=True, clip_scale=1, mixer=True):
         super().__init__()
         self.seq_len = seq_len
         self.h = h
         self.clip_size = clip_size
         self.blurry_recon = blurry_recon
         self.clip_scale = clip_scale
-        self.mixer_blocks1 = nn.ModuleList([
-            self.mixer_block1(h, drop) for _ in range(n_blocks)
-        ])
-        self.mixer_blocks2 = nn.ModuleList([
-            self.mixer_block2(seq_len, drop) for _ in range(n_blocks)
-        ])
+        self.mixer = mixer
+        
+        if mixer:
+            self.mixer_blocks1 = nn.ModuleList([
+                self.mixer_block1(h, drop) for _ in range(n_blocks)
+            ])
+            self.mixer_blocks2 = nn.ModuleList([
+                self.mixer_block2(seq_len, drop) for _ in range(n_blocks)
+            ])
         
         # Output linear layer
         self.backbone_linear = nn.Linear(h * seq_len, out_dim, bias=True) 
@@ -88,18 +96,19 @@ class BrainNetwork(nn.Module):
     def forward(self, x):
         # make empty tensors
         c,b = torch.Tensor([0.]), torch.Tensor([[0.],[0.]])
-        # Mixer blocks
-        residual1 = x
-        residual2 = x.permute(0,2,1)
-        for block1, block2 in zip(self.mixer_blocks1,self.mixer_blocks2):
-            x = block1(x) + residual1
+        if self.mixer:
+            # Mixer blocks
             residual1 = x
-            x = x.permute(0,2,1)
-            
-            x = block2(x) + residual2
-            residual2 = x
-            x = x.permute(0,2,1)
-            
+            residual2 = x.permute(0,2,1)
+            for block1, block2 in zip(self.mixer_blocks1,self.mixer_blocks2):
+                x = block1(x) + residual1
+                residual1 = x
+                x = x.permute(0,2,1)
+                
+                x = block2(x) + residual2
+                residual2 = x
+                x = x.permute(0,2,1)
+                
         x = x.reshape(x.size(0), -1)
         backbone = self.backbone_linear(x).reshape(len(x), -1, self.clip_size)
         if self.clip_scale>0:
@@ -816,3 +825,82 @@ class GNet8_Encoder():
         gnet8j_image_pred = self.gnet8j_predictions(self.stim_data, self._pred_fn, 64, 192, self.joined_checkpoint, mask, batch_size=100, device=self.device)
 
         return torch.from_numpy(gnet8j_image_pred[self.subject])
+    
+
+class NAT_BrainNet(nn.Module):
+    def __init__(self, args, clip_emb_dim=1664, clip_seq_dim=256):
+        super(NAT_BrainNet, self).__init__()
+        
+        # NAT backbone feature extractor
+        hidden_dim_nat = args.hidden_dim//4
+        self.nat = BrainNAT(
+            in_chans=1,
+            embed_dim=hidden_dim_nat,
+            depth=args.nat_depth,
+            num_heads=args.num_heads,
+            num_neighbors=args.nat_num_neighbors,
+            tome_r=args.tome_r,
+            layer_scale_init_value=1e-6,
+            coord_dim=3,
+            omega_0=30,
+            last_n_features=args.last_n_features
+        )
+        
+        # Add Adaptive Max Pooling to get fixed size feature vector
+        pool_dim = 64
+        self.voxel_adaptor = nn.AdaptiveMaxPool1d(pool_dim)
+        self.embed_linear = nn.Linear(hidden_dim_nat*pool_dim, args.hidden_dim)
+        
+        # Brain Network backbone
+        self.backbone = BrainNetwork(
+            h=args.hidden_dim, 
+            in_dim=args.hidden_dim,
+            seq_len=1,
+            n_blocks=args.n_blocks,
+            clip_size=clip_emb_dim,
+            out_dim=clip_emb_dim * clip_seq_dim,
+            blurry_recon=args.blurry_recon,
+            clip_scale=args.clip_scale,
+            mixer=args.use_mixer
+        )
+        
+        # Optional Prior Network
+        if args.use_prior:
+            out_dim = clip_emb_dim
+            depth = 6
+            dim_head = 52
+            heads = clip_emb_dim // 52
+            timesteps = 100
+            
+            prior_network = PriorNetwork(
+                dim=out_dim,
+                depth=depth,
+                dim_head=dim_head,
+                heads=heads,
+                causal=False,
+                num_tokens=clip_seq_dim,
+                learned_query_mode="pos_emb"
+            )
+            
+            self.diffusion_prior = BrainDiffusionPrior(
+                net=prior_network,
+                image_embed_dim=out_dim,
+                condition_on_text_encodings=False,
+                timesteps=timesteps,
+                cond_drop_prob=0.2,
+                image_embed_scale=None,
+            )
+        else:
+            self.diffusion_prior = None
+
+    def forward(self, x, coords):
+        # NAT backbone processing
+        x = self.nat(x, coords)
+        x = x.permute(0, 2, 1)
+        x = self.voxel_adaptor(x)
+        x = self.embed_linear(x.flatten(1)).unsqueeze(1)
+        
+        # Brain Network processing
+        backbone, clip_voxels, blurry_image_enc = self.backbone(x)
+        
+        return backbone, clip_voxels, blurry_image_enc

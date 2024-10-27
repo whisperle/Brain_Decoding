@@ -80,8 +80,7 @@ def add_subject(sample):
 
 def load_web_dataset(args, split):
     if args.multi_subject:
-        subj_list = np.arange(1,9)
-        subj_list = subj_list[subj_list != args.subj]
+        subj_list = args.multi_subject
         nsessions_allsubj = np.array([40, 40, 32, 30, 40, 32, 40, 30])
     else:
         subj_list = [args.subj]

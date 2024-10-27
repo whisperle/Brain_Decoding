@@ -11,6 +11,7 @@ import string
 import h5py
 from tqdm import tqdm
 import webdataset as wds
+import wandb
 
 import matplotlib.pyplot as plt
 import torch
@@ -19,9 +20,8 @@ from torchvision import transforms
 from accelerate import Accelerator
 import kornia
 from kornia.augmentation.container import AugmentationSequential
+from models import NAT_BrainNet
 # Add the path for SDXL unCLIP requirements
-sys.path.append('../')
-from backbone import BrainNAT
 sys.path.append('generative_models/')
 import sgm
 from generative_models.sgm.modules.encoders.modules import FrozenOpenCLIPImageEmbedder  # bigG embedder
@@ -34,8 +34,6 @@ import utils
 from utils import save_ckpt
 from dataset import MindEye2Dataset, SubjectBatchSampler, custom_collate_fn
 import re
-
-from IPython import embed
 
 def parse_arguments():
     parser = argparse.ArgumentParser(description="Model Training Configuration")
@@ -66,7 +64,7 @@ def parse_arguments():
         help="Number of training sessions to include",
     )
     parser.add_argument(
-        "--use_prior", action=argparse.BooleanOptionalAction, default=True,
+        "--use_prior", action=argparse.BooleanOptionalAction, default=False,
         help="Whether to train diffusion prior (True) or just rely on retrieval part of the pipeline (False)",
     )
     parser.add_argument(
@@ -78,7 +76,7 @@ def parse_arguments():
         help="Whether to log to wandb",
     )
     parser.add_argument(
-        "--wandb_project", type=str, default="stability",
+        "--wandb_project", type=str, default="BRAIN_NAT",
         help="wandb project name",
     )
     parser.add_argument(
@@ -86,7 +84,7 @@ def parse_arguments():
         help="Proportion of way through training when to switch from BiMixCo to SoftCLIP",
     )
     parser.add_argument(
-        "--blurry_recon", action=argparse.BooleanOptionalAction, default=True,
+        "--blurry_recon", action=argparse.BooleanOptionalAction, default=False,
         help="Whether to output blurry reconstructions",
     )
     parser.add_argument(
@@ -110,8 +108,9 @@ def parse_arguments():
         help="Number of epochs of training",
     )
     parser.add_argument(
-        "--multi_subject", action=argparse.BooleanOptionalAction, default=False,
-        help="Whether to use multi-subject training",
+        "--multi_subject",type=lambda x: [int(i) for i in x.split(',')],
+        default="1,2,5,7",#[1,2,3,4,5,6,7,8],
+        help="List of subjects to use for multi-subject training",
     )
     parser.add_argument(
         "--new_test", action=argparse.BooleanOptionalAction, default=True,
@@ -122,7 +121,7 @@ def parse_arguments():
         help="Number of blocks in the model",
     )
     parser.add_argument(
-        "--hidden_dim", type=int, default=1024,
+        "--hidden_dim", type=int, default=1024, #todo Try 512
         help="Hidden dimension size",
     )
     parser.add_argument(
@@ -130,12 +129,16 @@ def parse_arguments():
         help="Type of learning rate scheduler",
     )
     parser.add_argument(
-        "--ckpt_saving", action=argparse.BooleanOptionalAction, default=True,
+        "--ckpt_saving", action=argparse.BooleanOptionalAction, default=False,
         help="Whether to save checkpoints",
     )
     parser.add_argument(
         "--ckpt_interval", type=int, default=5,
         help="Save backup checkpoint and reconstruct every x epochs",
+    )
+    parser.add_argument(
+        "--ckpt_iter", type=int, default=15000,
+        help="Save backup checkpoint and reconstruct every x iterations",
     )
     parser.add_argument(
         "--seed", type=int, default=42,
@@ -145,6 +148,30 @@ def parse_arguments():
         "--max_lr", type=float, default=3e-4,
         help="Maximum learning rate",
     )
+    parser.add_argument(
+        "--use_mixer", action=argparse.BooleanOptionalAction, default=False,
+        help="Whether to use the mixer",
+    )
+    parser.add_argument(
+        "--num_heads", type=int, default=4,
+        help="Number of attention heads in BrainNAT",
+    )
+    parser.add_argument(
+        "--tome_r", type=int, default=2000,
+        help="Token merging ratio for BrainNAT",
+    )
+    parser.add_argument(
+        "--last_n_features", type=int, default=16,
+        help="Number of features in the last layer of BrainNAT",
+    )
+    parser.add_argument(
+        "--nat_depth", type=int, default=2,
+        help="Depth of the BrainNAT model",
+    )
+    parser.add_argument(
+        "--nat_num_neighbors", type=int, default=8,
+        help="Number of neighbors in BrainNAT",
+    )    
     args = parser.parse_args()
     return args
 
@@ -153,11 +180,11 @@ def parse_arguments():
 def prepare_data(args, data_type):
     train_data = MindEye2Dataset(args, data_type, 'train')
     train_sampler = SubjectBatchSampler(train_data, args.batch_size)
-    train_dl = torch.utils.data.DataLoader(train_data, batch_sampler=train_sampler, collate_fn=custom_collate_fn, num_workers=8, pin_memory=True)
+    train_dl = torch.utils.data.DataLoader(train_data, batch_sampler=train_sampler, collate_fn=custom_collate_fn, num_workers=4, pin_memory=True)
 
     test_data = MindEye2Dataset(args, data_type, 'test')
-    test_sampler = SubjectBatchSampler(test_data, len(test_data))
-    test_dl = torch.utils.data.DataLoader(test_data, batch_sampler=test_sampler, collate_fn=custom_collate_fn, num_workers=8, pin_memory=True)
+    test_sampler = SubjectBatchSampler(test_data, args.batch_size)
+    test_dl = torch.utils.data.DataLoader(test_data, batch_sampler=test_sampler, collate_fn=custom_collate_fn, num_workers=4, pin_memory=True)
 
     num_iterations_per_epoch = len(train_data) // args.batch_size
     return train_dl, test_dl, len(test_data), num_iterations_per_epoch
@@ -168,8 +195,9 @@ def build_model(args, device, data_type):
         version="laion2b_s39b_b160k",
         output_tokens=True,
         only_tokens=True,
-    )
-    clip_img_embedder.to(device)
+    ).to(device)
+    print("clip_img_embedder")
+    utils.count_params(clip_img_embedder)
 
     clip_seq_dim = 256
     clip_emb_dim = 1664
@@ -182,21 +210,19 @@ def build_model(args, device, data_type):
             block_out_channels=[128, 256, 512, 512],
             layers_per_block=2,
             sample_size=256,
-        )
-        ckpt = torch.load(f'{args.cache_dir}/sd_image_var_autoenc.pth')
+        ).to(device)
+        ckpt = torch.load(f'{args.cache_dir}/sd_image_var_autoenc.pth', map_location=device)
         autoenc.load_state_dict(ckpt)
         autoenc.eval()
         autoenc.requires_grad_(False)
-        autoenc.to(device)
 
         from autoencoder.convnext import ConvnextXL
-        cnx = ConvnextXL(f'{args.cache_dir}/convnext_xlarge_alpha0.75_fullckpt.pth')
+        cnx = ConvnextXL(f'{args.cache_dir}/convnext_xlarge_alpha0.75_fullckpt.pth').to(device)
         cnx.requires_grad_(False)
         cnx.eval()
-        cnx.to(device)
 
-        mean = torch.tensor([0.485, 0.456, 0.406]).to(device).reshape(1, 3, 1, 1)
-        std = torch.tensor([0.228, 0.224, 0.225]).to(device).reshape(1, 3, 1, 1)
+        mean = torch.tensor([0.485, 0.456, 0.406]).reshape(1, 3, 1, 1).to(device)
+        std = torch.tensor([0.228, 0.224, 0.225]).reshape(1, 3, 1, 1).to(device)
 
         blur_augs = AugmentationSequential(
             kornia.augmentation.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.2, hue=0.1, p=0.8),
@@ -204,7 +230,7 @@ def build_model(args, device, data_type):
             kornia.augmentation.RandomSolarize(p=0.1),
             kornia.augmentation.RandomResizedCrop((224, 224), scale=(.9, .9), ratio=(1, 1), p=1.0),
             data_keys=["input"],
-        )
+        ).to(device)
     else:
         autoenc = None
         cnx = None
@@ -212,73 +238,10 @@ def build_model(args, device, data_type):
         std = None
         blur_augs = None
 
-    class MindEyeModule(nn.Module):
-        def __init__(self):
-            super(MindEyeModule, self).__init__()
-
-        def forward(self, x):
-            return x
-
-    model = MindEyeModule()
-    
-    # NAT backbone feature extractor
-    # TODO: test hyperparameters
-    hidden_dim_nat = args.hidden_dim//16 # 1024//4
-    model.nat = BrainNAT(
-        in_chans=1,
-        embed_dim=hidden_dim_nat,
-        depth=2,
-        num_heads=4,
-        num_neighbors=8,
-        tome_r=2000,
-        layer_scale_init_value=1e-6,
-        coord_dim=3,
-        omega_0=30,
-        last_n_features=16
-    )
-    # Add Adapative Max Pooling to the NAT backbone to get a fixed size feature vector
-    pool_dim = 64
-    model.voxel_adaptor = nn.AdaptiveMaxPool1d(pool_dim) # todo: ablation on this
-    model.embed_linear = nn.Linear(hidden_dim_nat*pool_dim, args.hidden_dim)
-    from models import BrainNetwork
-    model.backbone = BrainNetwork(h=args.hidden_dim, in_dim=args.hidden_dim, seq_len=1, n_blocks=args.n_blocks,
-                                  clip_size=clip_emb_dim, out_dim=clip_emb_dim * clip_seq_dim,
-                                  blurry_recon=args.blurry_recon, clip_scale=args.clip_scale)
-    utils.count_params(model.backbone)
+    model = NAT_BrainNet(args, clip_emb_dim, clip_seq_dim).to(device)
+    print("model parameters:")
     utils.count_params(model)
-    # ------------------ Prior Part ------------------
-    if args.use_prior:
-        from models import PriorNetwork, BrainDiffusionPrior
-        out_dim = clip_emb_dim
-        depth = 6
-        dim_head = 52
-        heads = clip_emb_dim // 52
-        timesteps = 100
-
-        prior_network = PriorNetwork(
-            dim=out_dim,
-            depth=depth,
-            dim_head=dim_head,
-            heads=heads,
-            causal=False,
-            num_tokens=clip_seq_dim,
-            learned_query_mode="pos_emb"
-        )
-
-        model.diffusion_prior = BrainDiffusionPrior(
-            net=prior_network,
-            image_embed_dim=out_dim,
-            condition_on_text_encodings=False,
-            timesteps=timesteps,
-            cond_drop_prob=0.2,
-            image_embed_scale=None,
-        )
-
-        utils.count_params(model.diffusion_prior)
-        utils.count_params(model)
-    else:
-        model.diffusion_prior = None
-
+    
     return clip_img_embedder, model, autoenc, cnx, mean, std, blur_augs
 
 def setup_optimizer(args, model, num_iterations_per_epoch):
@@ -324,7 +287,7 @@ def setup_optimizer(args, model, num_iterations_per_epoch):
     return optimizer, lr_scheduler
 
 
-def setup_wandb(args, num_params, train_url, test_url):
+def setup_wandb(args, num_params, train_url="", test_url=""):
     local_rank = os.getenv('RANK', 0)
     wandb_log = args.wandb_log
 
@@ -346,8 +309,8 @@ def setup_wandb(args, num_params, train_url, test_url):
             "ckpt_interval": args.ckpt_interval,
             "ckpt_saving": args.ckpt_saving,
             "seed": args.seed,
-            "train_url": train_url,
-            "test_url": test_url,
+            # "train_url": train_url,
+            # "test_url": test_url,
         }
         wandb.init(
             id=args.model_name,
@@ -361,13 +324,12 @@ def setup_wandb(args, num_params, train_url, test_url):
     return wandb_log
 
 
-def train(args, model, train_dl, test_dl, accelerator, device, data_type, num_iterations_per_epoch,
+def train(args, model, train_dl, test_dl, accelerator, data_type, num_iterations_per_epoch,
           num_test, subj_list, clip_img_embedder, optimizer, lr_scheduler, wandb_log, autoenc, cnx, mean, std,
-          blur_augs, local_rank):
+          blur_augs):
     epoch = 0
     losses, test_losses, lrs = [], [], []
     best_test_loss = 1e9
-    torch.cuda.empty_cache()
     num_epochs = args.num_epochs
     batch_size = args.batch_size
     ckpt_interval = args.ckpt_interval
@@ -383,16 +345,15 @@ def train(args, model, train_dl, test_dl, accelerator, device, data_type, num_it
 
     model, optimizer, train_dl, lr_scheduler = accelerator.prepare(model, optimizer, train_dl, lr_scheduler)
 
-    print(f"{model_name} starting with epoch {epoch} / {num_epochs}")
-    progress_bar = tqdm(range(epoch,num_epochs), ncols=1200, disable=(local_rank!=0))
+    accelerator.print(f"{model_name} starting with epoch {epoch} / {num_epochs}")
+    progress_bar = tqdm(range(epoch,num_epochs), ncols=1200, disable=not accelerator.is_local_main_process)
     test_image, test_voxel = None, None
     mse = nn.MSELoss()
     l1 = nn.L1Loss()
     soft_loss_temps = utils.cosine_anneal(0.004, 0.0075, num_epochs - int(mixup_pct * num_epochs))
-
     for epoch in progress_bar:
         model.train()
-
+        iteration = 0
         fwd_percent_correct = 0.
         bwd_percent_correct = 0.
         test_fwd_percent_correct = 0.
@@ -413,43 +374,29 @@ def train(args, model, train_dl, test_dl, accelerator, device, data_type, num_it
 
         blurry_pixcorr = 0.
         test_blurry_pixcorr = 0. # needs >.456 to beat low-level subj01 results in mindeye v1
-
         for train_i, (images, voxels, subj_idx, coords, image_idx) in enumerate(train_dl):
             with torch.amp.autocast('cuda'):
                 optimizer.zero_grad()
                 loss=0.
 
-                image = images.detach().to(device)
-                voxels = voxels.detach().to(device)
-                coords = coords.detach().to(device)
-
                 lens = torch.ones(voxels.shape[0], dtype=torch.long)*voxels.shape[-1]
-                lens = lens.detach().to(device)
 
                 image_idx = image_idx.cpu().long().numpy()
                 _, img_sorted_idx = np.unique(image_idx, return_index=True)
                 voxel0 = voxels[img_sorted_idx]
-                image = image[img_sorted_idx]
+                image = images[img_sorted_idx]
                 coords = coords[img_sorted_idx]
 
                 if epoch < int(mixup_pct * num_epochs):
                     voxel0, perm, betas, select = utils.mixco(voxel0)
-                    perm = perm.detach().to(device)
-                    betas = betas.detach().to(device)
-                    select = select.detach().to(device)
 
                 if use_image_aug: 
                     image = img_augment(image)
 
                 clip_target = clip_img_embedder(image)
                 assert not torch.any(torch.isnan(clip_target))
-                voxel_nat = model.nat(voxel0, coords)
-                voxel_nat = voxel_nat.permute(0, 2, 1)
-                # Here I use adaptive max pooling to get a fixed size feature vector
-                # Need better way of doing this for variable length sequences
-                voxel_nat = model.voxel_adaptor(voxel_nat) 
-                voxel_nat = model.embed_linear(voxel_nat.flatten(1)).unsqueeze(1)
-                backbone, clip_voxels, blurry_image_enc_ = model.backbone(voxel_nat)
+                backbone, clip_voxels, blurry_image_enc_ = model(voxel0, coords)
+                    
                 if clip_scale>0:
                     clip_voxels_norm = nn.functional.normalize(clip_voxels.flatten(1), dim=-1)
                     clip_target_norm = nn.functional.normalize(clip_target.flatten(1), dim=-1)
@@ -495,7 +442,7 @@ def train(args, model, train_dl, test_dl, accelerator, device, data_type, num_it
                             image_enc_shuf[select] * (1 - betas[select]).reshape(*betas_shape)
 
                     image_norm = ((image - mean)/std)
-                    image_aug = (blur_augs(image.to(torch.float32)) - mean)/std
+                    image_aug = (blur_augs(image - mean))/std
                     _, cnx_embeds = cnx(image_norm)
                     _, cnx_aug_embeds = cnx(image_aug)
                     cont_loss = utils.soft_cont_loss(
@@ -530,10 +477,26 @@ def train(args, model, train_dl, test_dl, accelerator, device, data_type, num_it
 
                 if args.lr_scheduler_type is not None:
                     lr_scheduler.step()
+                if accelerator.is_main_process and wandb_log:
+                    wandb.log({
+                        "train/loss_per_iter": loss.item(),
+                        "train/blurry_pixcorr_per_iter": blurry_pixcorr / args.batch_size,
+                        "train/recon_cossim_per_iter": recon_cossim / args.batch_size,
+                        "train/recon_mse_per_iter": recon_mse / args.batch_size,
+                        "train/loss_prior_per_iter": loss_prior_total / args.batch_size,
+                        "train/loss_clip_per_iter": loss_clip_total / args.batch_size,
+                        "train/loss_blurry_per_iter": loss_blurry_total / args.batch_size,
+                        "train/loss_blurry_cont_per_iter": loss_blurry_cont_total / args.batch_size,
+                    })
 
-        embed()
+                iteration += 1
+                if accelerator.is_main_process:
+                    if iteration % args.ckpt_iter == 0 and ckpt_saving:
+                        save_ckpt(f'iter_{iteration}', args, accelerator.unwrap_model(model), optimizer, lr_scheduler, epoch, losses, test_losses, lrs, accelerator, ckpt_saving=True)
+
+        # embed()
         model.eval()
-        if local_rank==0:
+        if accelerator.is_main_process:
             with torch.no_grad(), torch.cuda.amp.autocast(dtype=data_type): 
                 for test_i, (images, voxels, subj_idx, coords, image_idx) in enumerate(test_dl):  
                     # all test samples should be loaded per batch such that test_i should never exceed 0
@@ -565,22 +528,16 @@ def train(args, model, train_dl, test_dl, accelerator, device, data_type, num_it
                     loss=0.
                                 
                     test_indices = torch.arange(len(test_voxel))[:300]
-                    voxel = test_voxel[test_indices].to(device)
-                    coords = test_coords[test_indices].to(device)
-                    lens = test_lens[test_indices].to(device)
-                    image = test_image[test_indices].to(device)
+                    voxel = test_voxel[test_indices]
+                    coords = test_coords[test_indices]
+                    lens = test_lens[test_indices]
+                    image = test_image[test_indices]
                     assert len(image) == 300
 
                     clip_target = clip_img_embedder(image.float())
 
                     for rep in range(3):
-                        voxel_nat = model.nat(voxel0, coords)
-                        voxel_nat = voxel_nat.permute(0, 2, 1)
-                        # Here I use adaptive max pooling to get a fixed size feature vector
-                        # Need better way of doing this for variable length sequences
-                        voxel_nat = model.voxel_adaptor(voxel_nat) 
-                        voxel_nat = model.embed_linear(voxel_nat.flatten(1)).unsqueeze(1)
-                        backbone, clip_voxels, blurry_image_enc_ = model.backbone(voxel_nat)
+                        backbone, clip_voxels, blurry_image_enc_ = model(voxel, coords)
                         if rep==0:
                             clip_voxels = clip_voxels0
                             backbone = backbone0
@@ -627,6 +584,15 @@ def train(args, model, train_dl, test_dl, accelerator, device, data_type, num_it
                     
                     utils.check_loss(loss)                
                     test_losses.append(loss.item())
+                    if wandb_log:
+                        wandb.log({
+                            "test/loss_per_iter": loss.item(),
+                            "test/blurry_pixcorr_per_iter": test_blurry_pixcorr / len(image),
+                            "test/recon_cossim_per_iter": test_recon_cossim / len(image),
+                            "test/recon_mse_per_iter": test_recon_mse / len(image),
+                            "test/loss_prior_per_iter": test_loss_prior_total / len(image),
+                            "test/loss_clip_per_iter": test_loss_clip_total / len(image),
+                        })
 
                 assert (test_i+1) == 1
                 logs = {"train/loss": np.mean(losses[-(train_i+1):]),
@@ -679,17 +645,17 @@ def train(args, model, train_dl, test_dl, accelerator, device, data_type, num_it
                 
         # Save model checkpoint and reconstruct
         if (ckpt_saving) and (epoch % ckpt_interval == 0):
-            save_ckpt(f'last',args,model,optimizer,lr_scheduler,epoch, losses, test_losses, lrs, accelerator, ckpt_saving=True)
+            save_ckpt(f'last',args,accelerator.unwrap_model(model),optimizer,lr_scheduler,epoch, losses, test_losses, lrs, accelerator, ckpt_saving=True)
 
         # wait for other GPUs to catch up if needed
         accelerator.wait_for_everyone()
-        torch.cuda.empty_cache()
 
-    print("\n===Finished!===\n")
+    accelerator.print("\n===Finished!===\n")
     if ckpt_saving:
-        save_ckpt(f'last',args,model,optimizer,lr_scheduler,epoch, losses, test_losses, lrs, accelerator, ckpt_saving=True)
+        save_ckpt(f'last',args,accelerator.unwrap_model(model),optimizer,lr_scheduler,epoch, losses, test_losses, lrs, accelerator, ckpt_saving=True)
 
 def main():
+    torch._dynamo.config.optimize_ddp=False
     args = parse_arguments()
     utils.seed_everything(args.seed)
     data_type = torch.float16  # Change depending on your mixed_precision
@@ -699,12 +665,8 @@ def main():
     if num_devices == 0:
         num_devices = 1
     args.num_devices = num_devices
-    accelerator = Accelerator(split_batches=False, mixed_precision="fp16")
+    accelerator = Accelerator(device_placement=True, split_batches=False, mixed_precision="fp16",dynamo_backend="no")
     device = accelerator.device
-
-    # if utils.is_interactive():
-    #     batch_size = args.batch_size = 8
-    # else:
     batch_size = args.batch_size
 
     if args.use_image_aug or args.blurry_recon:
@@ -723,16 +685,15 @@ def main():
     train_dl, test_dl, num_test, num_iterations_per_epoch = prepare_data(args, data_type)
 
     clip_img_embedder, model, autoenc, cnx, mean, std, blur_augs = build_model(args, device, data_type)
-
     optimizer, lr_scheduler = setup_optimizer(args, model, num_iterations_per_epoch)
 
     num_params = utils.count_params(model)
 
-    wandb_log = setup_wandb(args, num_params, train_url="", test_url="")  # Update with actual URLs if needed
+    wandb_log = setup_wandb(args, num_params)#,train_url="", test_url="")  # Update with actual URLs if needed
 
-    train(args, model, train_dl, test_dl, accelerator, device, data_type, num_iterations_per_epoch,
+    train(args, model, train_dl, test_dl, accelerator, data_type, num_iterations_per_epoch,
           num_test, [args.subj], clip_img_embedder, optimizer, lr_scheduler, wandb_log, autoenc, cnx, mean, std,
-          blur_augs, local_rank)
+          blur_augs)
 
 
 if __name__ == "__main__":
