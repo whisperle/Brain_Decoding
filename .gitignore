@@ -1,7 +1,8 @@
 # Byte-compiled / optimized / DLL files
+jobs/
 __pycache__/
 *.py[cod]
-
+wandb/
 # notebook
 .ipynb_checkpoints/
 
