@@ -32,8 +32,8 @@ class MindEye2Dataset(Dataset):
         image_id = int(behav0[0,0])
         voxel_id = int(behav0[0,5])
         subj_id = int(subj_id)
-        coord = self.coords[f'subj0{subj_id}']
-
+        coord = self.coords[f'subj0{subj_id}'] 
+        # Print device information for debugging
         return torch.tensor(self.images[image_id],dtype=self.data_type), self.voxels[f'subj0{subj_id}'][voxel_id].view(1,-1), subj_id, coord, image_id
 
 class SubjectBatchSampler(Sampler):
@@ -152,3 +152,8 @@ if __name__ == "__main__":
     train_data = MindEye2Dataset(args, data_type, 'train')
     sampler = SubjectBatchSampler(train_data, batch_size)
     dataloader = DataLoader(train_data, batch_sampler=sampler, collate_fn=custom_collate_fn, num_workers=8, pin_memory=True)
+    
+    for i, (images, voxels, subjects, coords, image_idx) in enumerate(dataloader):
+        print(images.shape, voxels.shape, subjects.shape, coords.shape, image_idx.shape)
+        break
+    

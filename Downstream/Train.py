@@ -171,7 +171,11 @@ def parse_arguments():
     parser.add_argument(
         "--nat_num_neighbors", type=int, default=8,
         help="Number of neighbors in BrainNAT",
-    )    
+    )
+    parser.add_argument(
+        "--full_attention", action="store_true",
+        help="Whether to use full attention in BrainNAT",
+    )
     args = parser.parse_args()
     return args
 
@@ -239,6 +243,7 @@ def build_model(args, device, data_type):
         blur_augs = None
 
     model = NAT_BrainNet(args, clip_emb_dim, clip_seq_dim).to(device)
+    model = torch.compile(model)
     print("model parameters:")
     utils.count_params(model)
     
@@ -248,16 +253,35 @@ def setup_optimizer(args, model, num_iterations_per_epoch):
     no_decay = ['bias', 'LayerNorm.bias', 'LayerNorm.weight']
     max_lr = args.max_lr
 
+    # Group parameters for NAT backbone
     opt_grouped_parameters = [
         {'params': [p for n, p in model.nat.named_parameters() if not any(nd in n for nd in no_decay)],
-             'weight_decay': 1e-2},
+         'weight_decay': 1e-2},
         {'params': [p for n, p in model.nat.named_parameters() if any(nd in n for nd in no_decay)],
-             'weight_decay': 0.0},
+         'weight_decay': 0.0},
+    ]
+
+    # Add voxel adaptor and embed linear parameters
+    opt_grouped_parameters.extend([
+        {'params': [p for n, p in model.voxel_adaptor.named_parameters() if not any(nd in n for nd in no_decay)],
+         'weight_decay': 1e-2},
+        {'params': [p for n, p in model.voxel_adaptor.named_parameters() if any(nd in n for nd in no_decay)],
+         'weight_decay': 0.0},
+        {'params': [p for n, p in model.embed_linear.named_parameters() if not any(nd in n for nd in no_decay)],
+         'weight_decay': 1e-2}, 
+        {'params': [p for n, p in model.embed_linear.named_parameters() if any(nd in n for nd in no_decay)],
+         'weight_decay': 0.0},
+    ])
+
+    # Add backbone parameters
+    opt_grouped_parameters.extend([
         {'params': [p for n, p in model.backbone.named_parameters() if not any(nd in n for nd in no_decay)],
          'weight_decay': 1e-2},
         {'params': [p for n, p in model.backbone.named_parameters() if any(nd in n for nd in no_decay)],
          'weight_decay': 0.0},
-    ]
+    ])
+
+    # Add prior network parameters if enabled
     if args.use_prior:
         opt_grouped_parameters.extend([
             {'params': [p for n, p in model.diffusion_prior.named_parameters() if not any(nd in n for nd in no_decay)],

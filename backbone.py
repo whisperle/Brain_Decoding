@@ -60,10 +60,11 @@ class SirenPositionalEmbedding(nn.Module):
 
 class BrainNATLayer(nn.Module):
     def __init__(self, dim, num_heads, num_neighbors, mlp_ratio=4., qkv_bias=True, drop=0., attn_drop=0.,
-                 drop_path=0., norm_layer=nn.LayerNorm, tome_r=0, layer_scale_init_value=1e-6, use_coords=True, last_n_features=16):
+                 drop_path=0., norm_layer=nn.LayerNorm, tome_r=0, layer_scale_init_value=1e-6, use_coords=True,
+                 last_n_features=16, full_attention=False):
         super().__init__()
         self.norm1 = norm_layer(dim)
-        self.attn = NearestNeighborAttention(dim, num_heads, num_neighbors)
+        self.attn = NearestNeighborAttention(dim, num_heads, num_neighbors, full_attention=full_attention)
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
         self.norm2 = norm_layer(dim)
         self.token_merging = TokenMerging(r=tome_r)
@@ -90,7 +91,8 @@ class BrainNATLayer(nn.Module):
 
 class BrainNATBlock(nn.Module):
     def __init__(self, dim, depth, num_heads, num_neighbors, mlp_ratio=4., qkv_bias=True, drop=0.,
-                 attn_drop=0., drop_path=0., norm_layer=nn.LayerNorm, tome_r=0, layer_scale_init_value=1e-6, last_n_features=16):
+                 attn_drop=0., drop_path=0., norm_layer=nn.LayerNorm, tome_r=0, layer_scale_init_value=1e-6,
+                 last_n_features=16, full_attention=False):
         super().__init__()
         self.blocks = nn.ModuleList([
             BrainNATLayer(
@@ -98,7 +100,7 @@ class BrainNATBlock(nn.Module):
                 mlp_ratio=mlp_ratio, qkv_bias=qkv_bias, drop=drop, attn_drop=attn_drop,
                 drop_path=drop_path[i] if isinstance(drop_path, list) else drop_path,
                 norm_layer=norm_layer, tome_r=tome_r, layer_scale_init_value=layer_scale_init_value,
-                use_coords=(i == 0), last_n_features=last_n_features)
+                use_coords=(i == 0), last_n_features=last_n_features, full_attention=full_attention)
             for i in range(depth)])
 
     def forward(self, x, coords):
@@ -109,7 +111,8 @@ class BrainNATBlock(nn.Module):
 class BrainNAT(nn.Module):
     def __init__(self, in_chans=1, embed_dim=96, depth=4, num_heads=8, num_neighbors=5,
                  mlp_ratio=4., qkv_bias=True, drop_rate=0., attn_drop_rate=0., drop_path_rate=0.2,
-                 norm_layer=nn.LayerNorm, tome_r=0, layer_scale_init_value=1e-6, coord_dim=3, omega_0=30, last_n_features=16):
+                 norm_layer=nn.LayerNorm, tome_r=0, layer_scale_init_value=1e-6, coord_dim=3, 
+                 omega_0=30, last_n_features=16,full_attention=False):
         super().__init__()
         self.embed_dim = 2 ** int(torch.log2(torch.tensor(embed_dim)).ceil().item())
         self.pos_embed_dim = embed_dim
@@ -126,7 +129,7 @@ class BrainNAT(nn.Module):
             depth=depth, num_heads=num_heads, num_neighbors=num_neighbors,
             mlp_ratio=mlp_ratio, qkv_bias=qkv_bias, drop=drop_rate,
             attn_drop=attn_drop_rate, drop_path=dpr, norm_layer=norm_layer, tome_r=tome_r,
-            layer_scale_init_value=layer_scale_init_value, last_n_features=last_n_features)
+            layer_scale_init_value=layer_scale_init_value, last_n_features=last_n_features, full_attention=full_attention)
         self.norm = norm_layer(self.total_embed_dim)
         self.head = nn.Linear(self.total_embed_dim, self.embed_dim)
         self.apply(self._init_weights)
@@ -196,7 +199,7 @@ if __name__ == "__main__":
     coord_dim = coords_1.shape[-1]
 
     # Initialize the model with adjusted dimensions
-    embed_dim = 128
+    embed_dim = 64
     # pos_embed_dim = 128  # Ensure that total_embed_dim is divisible by num_heads
     num_heads = 8  # Ensure total_embed_dim % num_heads == 0
 
@@ -207,43 +210,28 @@ if __name__ == "__main__":
         depth=4,
         num_heads=num_heads,
         num_neighbors=8,
-        tome_r=500,
+        tome_r=1000,
         layer_scale_init_value=1e-6,
         coord_dim=coord_dim,
         omega_0=30,
-        last_n_features=16 # Use the last 16 features for neighborhood attention
+        last_n_features=16, # Use the last 16 features for neighborhood attention
+        full_attention=True
     ).to(device)
 
     print("Number of parameters:", count_params(model))
     model.train()
 
     # Create input tensor for the batch
-    batch_size = 2
-    # pad the input scans to the same length
-    max_len = max(input_scan_1.shape[0], input_scan_2.shape[0])
-    input_scan_1 = np.pad(input_scan_1, ((0, max_len - input_scan_1.shape[0])), mode='constant')
-    input_scan_2 = np.pad(input_scan_2, ((0, max_len - input_scan_2.shape[0])), mode='constant')
-    coords_1 = np.pad(coords_1, ((0, max_len - coords_1.shape[0]), (0, 0)), mode='constant')
-    coords_2 = np.pad(coords_2, ((0, max_len - coords_2.shape[0]), (0, 0)), mode='constant')
-    coords_1 = torch.tensor(coords_1, dtype=torch.float32, device=device)
-    coords_2 = torch.tensor(coords_2, dtype=torch.float32, device=device)
-    coords = torch.stack([coords_1, coords_2], dim=0).to(device)
-    
-    
+    batch_size = 32
+    coords_1 = torch.tensor(coords_1, dtype=torch.float32, device=device).unsqueeze(0)
+    coords = torch.repeat_interleave(coords_1, batch_size, dim=0)
     input_scan_1 = torch.tensor(input_scan_1, dtype=torch.float32, device=device).unsqueeze(0)  # Add batch dimension
-    input_scan_2 = torch.tensor(input_scan_2, dtype=torch.float32, device=device).unsqueeze(0)  # Add batch dimension
-    # pad the input scans to the same length
-    # input_scan_1 = input_scan_1.repeat(batch_size, 1, 1)
-    # input_scan_2 = input_scan_2.repeat(batch_size, 1, 1)
-    
     # Dummy input tensor for batch of two subjects
-    x = torch.cat([input_scan_1, input_scan_2], dim=0).unsqueeze(1)
-    
-    # Lengths of the input sequences in the batch (for packing)
-    lens = torch.tensor([input_scan_1.size(1), input_scan_2.size(1)], dtype=torch.long, device=device)
-    
+    x = torch.repeat_interleave(input_scan_1, batch_size, dim=0).unsqueeze(1)
+    print("x shape:", x.shape)
+    print("coords shape:", coords.shape)
     # Forward pass
-    output = model(x, coords, lens)
+    output = model(x, coords)
     print("Output shape:", output.shape)
 
     # Create a virtual target tensor of the same shape as the output

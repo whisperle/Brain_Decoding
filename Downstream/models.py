@@ -843,7 +843,8 @@ class NAT_BrainNet(nn.Module):
             layer_scale_init_value=1e-6,
             coord_dim=3,
             omega_0=30,
-            last_n_features=args.last_n_features
+            last_n_features=args.last_n_features,
+            full_attention=args.full_attention
         )
         
         # Add Adaptive Max Pooling to get fixed size feature vector
