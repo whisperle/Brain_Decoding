@@ -510,16 +510,16 @@ def train(args, model, train_dl, test_dl, accelerator, data_type, num_iterations
                         "train/loss_clip_per_iter": loss_clip_total / args.batch_size,
                         "train/loss_blurry_per_iter": loss_blurry_total / args.batch_size,
                         "train/loss_blurry_cont_per_iter": loss_blurry_cont_total / args.batch_size,
-                        "train/iter_time": iter_time,
-                        "train/avg_iter_time": avg_iter_time,
+                        # "train/iter_time": iter_time,
+                        # "train/avg_iter_time": avg_iter_time,
                     })
 
                 # Print timing info every 10 iterations
-                if (train_i + 1) % 10 == 0:
-                    accelerator.print(f"Epoch {epoch}, Iteration {train_i + 1}")
-                    accelerator.print(f"Last iter time: {iter_time:.3f}s")
-                    accelerator.print(f"Average iter time: {avg_iter_time:.3f}s")
-                    accelerator.print(f"Estimated epoch time: {avg_iter_time * num_iterations_per_epoch:.1f}s")
+                # if (train_i + 1) % 10 == 0:
+                #     accelerator.print(f"Epoch {epoch}, Iteration {train_i + 1}")
+                #     accelerator.print(f"Last iter time: {iter_time:.3f}s")
+                #     accelerator.print(f"Average iter time: {avg_iter_time:.3f}s")
+                #     accelerator.print(f"Estimated epoch time: {avg_iter_time * num_iterations_per_epoch:.1f}s")
 
                 iteration += 1
                 if accelerator.is_main_process:
@@ -527,21 +527,21 @@ def train(args, model, train_dl, test_dl, accelerator, data_type, num_iterations
                         save_ckpt(f'iter_{iteration}', args, accelerator.unwrap_model(model), optimizer, lr_scheduler, epoch, losses, test_losses, lrs, accelerator, ckpt_saving=True)
 
         # Add epoch timing summary
-        if accelerator.is_main_process:
-            # epoch_time = sum(iter_times)
-            # accelerator.print(f"\nEpoch {epoch} Summary:")
-            # accelerator.print(f"Total epoch time: {epoch_time:.1f}s")
-            # accelerator.print(f"Average iteration time: {np.mean(iter_times):.3f}s")
-            # accelerator.print(f"Min iteration time: {np.min(iter_times):.3f}s")
-            # accelerator.print(f"Max iteration time: {np.max(iter_times):.3f}s")
+        # if accelerator.is_main_process:
+        #     # epoch_time = sum(iter_times)
+        #     # accelerator.print(f"\nEpoch {epoch} Summary:")
+        #     # accelerator.print(f"Total epoch time: {epoch_time:.1f}s")
+        #     # accelerator.print(f"Average iteration time: {np.mean(iter_times):.3f}s")
+        #     # accelerator.print(f"Min iteration time: {np.min(iter_times):.3f}s")
+        #     # accelerator.print(f"Max iteration time: {np.max(iter_times):.3f}s")
             
-            if wandb_log:
-                wandb.log({
-                    "train/epoch_time": epoch_time,
-                    "train/epoch_avg_iter_time": np.mean(iter_times),
-                    "train/epoch_min_iter_time": np.min(iter_times),
-                    "train/epoch_max_iter_time": np.max(iter_times),
-                })
+        #     # if wandb_log:
+        #     #     wandb.log({
+        #     #         "train/epoch_time": epoch_time,
+        #     #         "train/epoch_avg_iter_time": np.mean(iter_times),
+        #     #         "train/epoch_min_iter_time": np.min(iter_times),
+        #     #         "train/epoch_max_iter_time": np.max(iter_times),
+        #     #     })
 
         # embed()
         model.eval()
