@@ -94,8 +94,11 @@ class BrainNetwork(nn.Module):
         )
         
     def forward(self, x):
-        # make empty tensors
-        c,b = torch.Tensor([0.]), torch.Tensor([[0.],[0.]])
+        # make empty tensors with proper batch size
+        batch_size = x.shape[0]
+        c = torch.zeros((batch_size, 1), device=x.device)
+        b = torch.zeros((batch_size, 2, 1), device=x.device)
+        
         if self.mixer:
             # Mixer blocks
             residual1 = x
@@ -109,8 +112,8 @@ class BrainNetwork(nn.Module):
                 residual2 = x
                 x = x.permute(0,2,1)
                 
-        x = x.reshape(x.size(0), -1)
-        backbone = self.backbone_linear(x).reshape(len(x), -1, self.clip_size)
+        x = x.reshape(batch_size, -1)
+        backbone = self.backbone_linear(x).reshape(batch_size, -1, self.clip_size)
         if self.clip_scale>0:
             c = self.clip_proj(backbone)
 
@@ -120,7 +123,7 @@ class BrainNetwork(nn.Module):
             b = b.reshape(b.shape[0], -1, 7, 7).contiguous()
             b = self.bnorm(b)
             b_aux = self.b_maps_projector(b).flatten(2).permute(0,2,1)
-            b_aux = b_aux.view(len(b_aux), 49, 512)
+            b_aux = b_aux.view(batch_size, 49, 512)
             b = (self.bupsampler(b), b_aux)
         
         return backbone, c, b
@@ -903,5 +906,10 @@ class NAT_BrainNet(nn.Module):
         
         # Brain Network processing
         backbone, clip_voxels, blurry_image_enc = self.backbone(x)
+        
+        # Add shape assertions for debugging
+        batch_size = x.shape[0]
+        assert backbone.shape[0] == batch_size, f"Expected backbone batch size {batch_size}, got {backbone.shape[0]}"
+        assert clip_voxels.shape[0] == batch_size, f"Expected clip_voxels batch size {batch_size}, got {clip_voxels.shape[0]}"
         
         return backbone, clip_voxels, blurry_image_enc

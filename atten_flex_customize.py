@@ -2,8 +2,9 @@ import torch
 import torch.nn as nn
 from functools import lru_cache
 from torch.nn.attention.flex_attention import flex_attention, create_block_mask
+from torch.nn.attention import SDPBackend, sdpa_kernel
 
-flex_attention = torch.compile(flex_attention)
+# flex_attention = torch.compile(flex_attention)
 class NearestNeighborAttention(nn.Module):
     def __init__(self, feature_dim, num_heads, num_neighbors, full_attention=True):
         super().__init__()
@@ -96,10 +97,11 @@ class NearestNeighborAttention(nn.Module):
             # Apply attention based on full_attention flag
             if self.full_attention:
                 # Use PyTorch's scaled_dot_product_attention function
-                output = torch.nn.functional.scaled_dot_product_attention(
-                    query, key, value,
-                    scale=self.scale
-                )
+                with sdpa_kernel(backends=[SDPBackend.FLASH_ATTENTION]):
+                    output = torch.nn.functional.scaled_dot_product_attention(
+                        query, key, value,
+                        scale=self.scale
+                    )
             else:
                 # Apply flex attention for sparse attention
                 output = flex_attention(query, key, value, block_mask=attention_mask)

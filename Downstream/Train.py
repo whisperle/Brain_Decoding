@@ -184,11 +184,11 @@ def parse_arguments():
 def prepare_data(args, data_type):
     train_data = MindEye2Dataset(args, data_type, 'train')
     train_sampler = SubjectBatchSampler(train_data, args.batch_size)
-    train_dl = torch.utils.data.DataLoader(train_data, batch_sampler=train_sampler, collate_fn=custom_collate_fn, num_workers=4, pin_memory=True)
+    train_dl = torch.utils.data.DataLoader(train_data, batch_sampler=train_sampler, collate_fn=custom_collate_fn, num_workers=16, pin_memory=True, persistent_workers=True)
 
     test_data = MindEye2Dataset(args, data_type, 'test')
     test_sampler = SubjectBatchSampler(test_data, args.batch_size)
-    test_dl = torch.utils.data.DataLoader(test_data, batch_sampler=test_sampler, collate_fn=custom_collate_fn, num_workers=4, pin_memory=True)
+    test_dl = torch.utils.data.DataLoader(test_data, batch_sampler=test_sampler, collate_fn=custom_collate_fn, num_workers=16, pin_memory=True, persistent_workers=True)
 
     num_iterations_per_epoch = len(train_data) // args.batch_size
     return train_dl, test_dl, len(test_data), num_iterations_per_epoch
@@ -243,7 +243,7 @@ def build_model(args, device, data_type):
         blur_augs = None
 
     model = NAT_BrainNet(args, clip_emb_dim, clip_seq_dim).to(device)
-    model = torch.compile(model)
+    # model = torch.compile(model)
     print("model parameters:")
     utils.count_params(model)
     
@@ -380,8 +380,18 @@ def train(args, model, train_dl, test_dl, accelerator, data_type, num_iterations
 
         blurry_pixcorr = 0.
         test_blurry_pixcorr = 0. # needs >.456 to beat low-level subj01 results in mindeye v1
+        # Add timing variables
+        # iter_times = []
+        # total_time = 0
+        
         for train_i, (images, voxels, subj_idx, coords, image_idx) in enumerate(train_dl):
+            # iter_start_time = time.time()  # Start timing
+            
             with torch.amp.autocast('cuda'):
+                batch_size = voxels.shape[0]
+                if batch_size != args.batch_size:
+                    print(f"Warning: Batch size mismatch. Expected {args.batch_size}, got {batch_size}")
+                    continue
                 optimizer.zero_grad()
                 loss=0.
 
@@ -483,6 +493,13 @@ def train(args, model, train_dl, test_dl, accelerator, data_type, num_iterations
 
                 if args.lr_scheduler_type is not None:
                     lr_scheduler.step()
+                    
+                # Calculate iteration time
+                # iter_time = time.time() - iter_start_time
+                # iter_times.append(iter_time)
+                # total_time += iter_time
+                # avg_iter_time = total_time / (train_i + 1)
+
                 if accelerator.is_main_process and wandb_log:
                     wandb.log({
                         "train/loss_per_iter": loss.item(),
@@ -493,12 +510,38 @@ def train(args, model, train_dl, test_dl, accelerator, data_type, num_iterations
                         "train/loss_clip_per_iter": loss_clip_total / args.batch_size,
                         "train/loss_blurry_per_iter": loss_blurry_total / args.batch_size,
                         "train/loss_blurry_cont_per_iter": loss_blurry_cont_total / args.batch_size,
+                        "train/iter_time": iter_time,
+                        "train/avg_iter_time": avg_iter_time,
                     })
+
+                # Print timing info every 10 iterations
+                if (train_i + 1) % 10 == 0:
+                    accelerator.print(f"Epoch {epoch}, Iteration {train_i + 1}")
+                    accelerator.print(f"Last iter time: {iter_time:.3f}s")
+                    accelerator.print(f"Average iter time: {avg_iter_time:.3f}s")
+                    accelerator.print(f"Estimated epoch time: {avg_iter_time * num_iterations_per_epoch:.1f}s")
 
                 iteration += 1
                 if accelerator.is_main_process:
                     if iteration % args.ckpt_iter == 0 and ckpt_saving:
                         save_ckpt(f'iter_{iteration}', args, accelerator.unwrap_model(model), optimizer, lr_scheduler, epoch, losses, test_losses, lrs, accelerator, ckpt_saving=True)
+
+        # Add epoch timing summary
+        if accelerator.is_main_process:
+            # epoch_time = sum(iter_times)
+            # accelerator.print(f"\nEpoch {epoch} Summary:")
+            # accelerator.print(f"Total epoch time: {epoch_time:.1f}s")
+            # accelerator.print(f"Average iteration time: {np.mean(iter_times):.3f}s")
+            # accelerator.print(f"Min iteration time: {np.min(iter_times):.3f}s")
+            # accelerator.print(f"Max iteration time: {np.max(iter_times):.3f}s")
+            
+            if wandb_log:
+                wandb.log({
+                    "train/epoch_time": epoch_time,
+                    "train/epoch_avg_iter_time": np.mean(iter_times),
+                    "train/epoch_min_iter_time": np.min(iter_times),
+                    "train/epoch_max_iter_time": np.max(iter_times),
+                })
 
         # embed()
         model.eval()
