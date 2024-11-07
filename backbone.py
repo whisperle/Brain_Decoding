@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from timm.models.layers import DropPath
-from atten_flex_customize import NearestNeighborAttention
+from attention import NearestNeighborAttention
 from tome_customize import TokenMerging
 
 class ConvTokenizer1D(nn.Module):
@@ -215,14 +215,14 @@ if __name__ == "__main__":
         coord_dim=coord_dim,
         omega_0=30,
         last_n_features=16, # Use the last 16 features for neighborhood attention
-        full_attention=True
+        full_attention=False
     ).to(device)
 
     print("Number of parameters:", count_params(model))
     model.train()
 
     # Create input tensor for the batch
-    batch_size = 32
+    batch_size = 2
     coords_1 = torch.tensor(coords_1, dtype=torch.float32, device=device).unsqueeze(0)
     coords = torch.repeat_interleave(coords_1, batch_size, dim=0)
     input_scan_1 = torch.tensor(input_scan_1, dtype=torch.float32, device=device).unsqueeze(0)  # Add batch dimension
