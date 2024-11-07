@@ -653,8 +653,6 @@ def train(args, model, train_dl, test_dl, accelerator, data_type, num_iterations
                         else:
                             plt.show()
 
-                progress_bar.set_postfix(**logs)
-
                 if wandb_log: wandb.log(logs)
                 
         # Save model checkpoint and reconstruct
