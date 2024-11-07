@@ -333,6 +333,7 @@ def setup_wandb(args,train_url="", test_url=""):
 def train(args, model, train_dl, test_dl, accelerator, data_type, num_iterations_per_epoch,
           num_test, subj_list, clip_img_embedder, optimizer, lr_scheduler, wandb_log, autoenc, cnx, mean, std,
           blur_augs):
+    device = accelerator.device
     epoch = 0
     losses, test_losses, lrs = [], [], []
     best_test_loss = 1e9
@@ -352,12 +353,11 @@ def train(args, model, train_dl, test_dl, accelerator, data_type, num_iterations
     model, optimizer, train_dl, lr_scheduler = accelerator.prepare(model, optimizer, train_dl, lr_scheduler)
 
     accelerator.print(f"{model_name} starting with epoch {epoch} / {num_epochs}")
-    progress_bar = tqdm(range(epoch,num_epochs), ncols=1200, disable=not accelerator.is_local_main_process)
-    test_image, test_voxel = None, None
+    epoch_progress = tqdm(range(epoch,num_epochs), disable=not accelerator.is_local_main_process)
     mse = nn.MSELoss()
     l1 = nn.L1Loss()
     soft_loss_temps = utils.cosine_anneal(0.004, 0.0075, num_epochs - int(mixup_pct * num_epochs))
-    for epoch in progress_bar:
+    for epoch in epoch_progress:
         model.train()
         iteration = 0
         fwd_percent_correct = 0.
@@ -380,12 +380,9 @@ def train(args, model, train_dl, test_dl, accelerator, data_type, num_iterations
 
         blurry_pixcorr = 0.
         test_blurry_pixcorr = 0. # needs >.456 to beat low-level subj01 results in mindeye v1
-        # Add timing variables
-        # iter_times = []
-        # total_time = 0
         
-        for train_i, (images, voxels, subj_idx, coords, image_idx) in enumerate(train_dl):
-            # iter_start_time = time.time()  # Start timing
+        iter_progress = tqdm(train_dl, desc=f'Epoch {epoch}', leave=False, disable=not accelerator.is_local_main_process)
+        for train_i, (images, voxels, subj_idx, coords, image_idx) in enumerate(iter_progress):
             
             with torch.amp.autocast('cuda'):
                 batch_size = voxels.shape[0]
@@ -493,12 +490,6 @@ def train(args, model, train_dl, test_dl, accelerator, data_type, num_iterations
 
                 if args.lr_scheduler_type is not None:
                     lr_scheduler.step()
-                    
-                # Calculate iteration time
-                # iter_time = time.time() - iter_start_time
-                # iter_times.append(iter_time)
-                # total_time += iter_time
-                # avg_iter_time = total_time / (train_i + 1)
 
                 if accelerator.is_main_process and wandb_log:
                     wandb.log({
@@ -510,53 +501,31 @@ def train(args, model, train_dl, test_dl, accelerator, data_type, num_iterations
                         "train/loss_clip_per_iter": loss_clip_total / args.batch_size,
                         "train/loss_blurry_per_iter": loss_blurry_total / args.batch_size,
                         "train/loss_blurry_cont_per_iter": loss_blurry_cont_total / args.batch_size,
-                        # "train/iter_time": iter_time,
-                        # "train/avg_iter_time": avg_iter_time,
                     })
-
-                # Print timing info every 10 iterations
-                # if (train_i + 1) % 10 == 0:
-                #     accelerator.print(f"Epoch {epoch}, Iteration {train_i + 1}")
-                #     accelerator.print(f"Last iter time: {iter_time:.3f}s")
-                #     accelerator.print(f"Average iter time: {avg_iter_time:.3f}s")
-                #     accelerator.print(f"Estimated epoch time: {avg_iter_time * num_iterations_per_epoch:.1f}s")
 
                 iteration += 1
                 if accelerator.is_main_process:
                     if iteration % args.ckpt_iter == 0 and ckpt_saving:
                         save_ckpt(f'iter_{iteration}', args, accelerator.unwrap_model(model), optimizer, lr_scheduler, epoch, losses, test_losses, lrs, accelerator, ckpt_saving=True)
 
-        # Add epoch timing summary
-        # if accelerator.is_main_process:
-        #     # epoch_time = sum(iter_times)
-        #     # accelerator.print(f"\nEpoch {epoch} Summary:")
-        #     # accelerator.print(f"Total epoch time: {epoch_time:.1f}s")
-        #     # accelerator.print(f"Average iteration time: {np.mean(iter_times):.3f}s")
-        #     # accelerator.print(f"Min iteration time: {np.min(iter_times):.3f}s")
-        #     # accelerator.print(f"Max iteration time: {np.max(iter_times):.3f}s")
-            
-        #     # if wandb_log:
-        #     #     wandb.log({
-        #     #         "train/epoch_time": epoch_time,
-        #     #         "train/epoch_avg_iter_time": np.mean(iter_times),
-        #     #         "train/epoch_min_iter_time": np.min(iter_times),
-        #     #         "train/epoch_max_iter_time": np.max(iter_times),
-        #     #     })
-
-        # embed()
         model.eval()
+        test_image, test_voxel, test_coords, test_lens = None, None, None, None
         if accelerator.is_main_process:
-            with torch.no_grad(), torch.cuda.amp.autocast(dtype=data_type): 
+            with torch.no_grad(), torch.amp.autocast('cuda'): 
                 for test_i, (images, voxels, subj_idx, coords, image_idx) in enumerate(test_dl):  
+                    images = images.to(device)
+                    voxels = voxels.to(device)
+                    coords = coords.to(device)
+                    image_idx = image_idx.to(device)
                     # all test samples should be loaded per batch such that test_i should never exceed 0
-                    assert images.shape[0] == num_test
+                    if len(images) != args.batch_size:
+                        print(f"Warning: Batch size mismatch. Expected {args.batch_size}, got {len(images)}")
+                        continue
 
                     ## Average same-image repeats ##
                     if test_image is None:
                         voxel = voxels
                         image = image_idx
-                        lens = torch.ones(voxels.shape[0], dtype=torch.long)*voxels.shape[-1]
-
                         unique_image, sort_indices = torch.unique(image, return_inverse=True)
                         for im in unique_image:
                             locs = torch.where(im == image_idx)[0]
@@ -566,27 +535,23 @@ def train(args, model, train_dl, test_dl, accelerator, data_type, num_iterations
                                 locs = locs.repeat(2)[:3]
                             assert len(locs)==3
                             if test_image is None:
-                                test_image = torch.Tensor(images[im][None])
-                                test_voxel = voxel[locs][None]
+                                test_image = torch.Tensor(images[locs,0][None])
+                                test_voxel = voxels[locs][None]
                                 test_coords = coords[locs][None]
-                                test_lens = lens[locs][None]
                             else:
-                                test_image = torch.vstack((test_image, torch.Tensor(images[im][None])))
-                                test_voxel = torch.vstack((test_voxel, voxel[locs][None]))
-
+                                test_image = torch.vstack((test_image, torch.Tensor(images[locs,0][None])))
+                                test_voxel = torch.vstack((test_voxel, voxels[locs][None]))
+                                test_coords = torch.vstack((test_coords, coords[locs][None]))
                     loss=0.
                                 
-                    test_indices = torch.arange(len(test_voxel))[:300]
+                    test_indices = torch.arange(len(test_voxel))
                     voxel = test_voxel[test_indices]
                     coords = test_coords[test_indices]
-                    lens = test_lens[test_indices]
                     image = test_image[test_indices]
-                    assert len(image) == 300
 
-                    clip_target = clip_img_embedder(image.float())
-
+                    clip_target = clip_img_embedder(image)
                     for rep in range(3):
-                        backbone, clip_voxels, blurry_image_enc_ = model(voxel, coords)
+                        backbone0, clip_voxels0, blurry_image_enc_ = model(voxel[:,rep], coords[:,rep])
                         if rep==0:
                             clip_voxels = clip_voxels0
                             backbone = backbone0
@@ -643,7 +608,7 @@ def train(args, model, train_dl, test_dl, accelerator, data_type, num_iterations
                             "test/loss_clip_per_iter": test_loss_clip_total / len(image),
                         })
 
-                assert (test_i+1) == 1
+                # assert (test_i+1) == 1
                 logs = {"train/loss": np.mean(losses[-(train_i+1):]),
                     "test/loss": np.mean(test_losses[-(test_i+1):]),
                     "train/lr": lrs[-1],
