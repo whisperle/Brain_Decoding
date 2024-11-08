@@ -217,28 +217,28 @@ if __name__ == "__main__":
         last_n_features=16, # Use the last 16 features for neighborhood attention
         full_attention=False
     ).to(device)
-
-    print("Number of parameters:", count_params(model))
-    model.train()
-
-    # Create input tensor for the batch
     batch_size = 2
     coords_1 = torch.tensor(coords_1, dtype=torch.float32, device=device).unsqueeze(0)
     coords = torch.repeat_interleave(coords_1, batch_size, dim=0)
     input_scan_1 = torch.tensor(input_scan_1, dtype=torch.float32, device=device).unsqueeze(0)  # Add batch dimension
     # Dummy input tensor for batch of two subjects
     x = torch.repeat_interleave(input_scan_1, batch_size, dim=0).unsqueeze(1)
-    print("x shape:", x.shape)
-    print("coords shape:", coords.shape)
-    # Forward pass
-    output = model(x, coords)
-    print("Output shape:", output.shape)
+    print("Number of parameters:", count_params(model))
+    model.train()
+    for i in range(10):
+        # Create input tensor for the batch
 
-    # Create a virtual target tensor of the same shape as the output
-    y = torch.randn(output.shape, device=device)
+        print("x shape:", x.shape)
+        print("coords shape:", coords.shape)
+        # Forward pass
+        output = model(x, coords)
+        print("Output shape:", output.shape)
 
-    # Compute the loss
-    criterion = nn.MSELoss()
-    loss = criterion(output, y)
-    print("Loss:", loss.item())
-    loss.backward()
+        # Create a virtual target tensor of the same shape as the output
+        y = torch.randn(output.shape, device=device)
+
+        # Compute the loss
+        criterion = nn.MSELoss()
+        loss = criterion(output, y)
+        print("Loss:", loss.item())
+        loss.backward()

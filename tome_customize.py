@@ -38,9 +38,8 @@ class TokenMerging(nn.Module):
                     merge, x, self._tome_info["source"]
                 )
             try:
-                x, self._tome_info["size"] = merge_wavg(
-                    merge, x, self._tome_info["size"]
-                )
-            except:
+                x, self._tome_info["size"] = merge_wavg(merge, x, self._tome_info["size"])
+            except Exception as e:
+                print(f"Error in merge_wavg: {str(e)}")
                 import pdb; pdb.set_trace()
         return x
