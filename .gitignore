@@ -9,6 +9,9 @@ wandb/
 # tran_longs
 train_logs/
 
+# ckpt
+ckpt/
+
 # test files
 **/test*
 

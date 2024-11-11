@@ -143,10 +143,13 @@ class BrainNAT(nn.Module):
             nn.init.constant_(m.bias, 0)
             nn.init.constant_(m.weight, 1.0)
 
-    def forward_features(self, x, coords):
+    def forward_features(self, x, coords, jepa_mask=False, num_masks=None, mask_size=None, mask_token=None):
         x = self.embed_layer(x)  
 
         x = self.pos_drop(x)
+
+        if jepa_mask:
+            x = self.apply_jepa_mask(x, num_masks, mask_size, mask_token)
         
         pos_embeds = self.pos_embed(coords)
         x = x + pos_embeds
@@ -155,10 +158,23 @@ class BrainNAT(nn.Module):
         x = self.norm(x)
         return x
 
-    def forward(self, x, coords):
-        x = self.forward_features(x, coords)
+    def forward(self, x, coords, jepa_mask=False, num_masks=None, mask_size=None, mask_token=None):
+        x = self.forward_features(x, coords, jepa_mask, num_masks, mask_size, mask_token)
         x = self.head(x)
         return x
+
+    def apply_jepa_mask(self, x, num_masks, mask_size, mask_token):
+        batch_size, sequence_length, embed_size = x.shape
+    
+        for _ in range(num_masks):
+            start_indices = torch.randint(0, sequence_length - mask_size + 1, (batch_size,))
+            
+            for i, start_idx in enumerate(start_indices):
+                end_idx = min(start_idx + mask_size, sequence_length)
+                x[i, start_idx:end_idx, :] = mask_token
+        
+        return x
+
 
 # Example usage
 if __name__ == "__main__":
@@ -215,14 +231,20 @@ if __name__ == "__main__":
         coord_dim=coord_dim,
         omega_0=30,
         last_n_features=16, # Use the last 16 features for neighborhood attention
-        full_attention=False
+        full_attention=True
     ).to(device)
-    batch_size = 2
+    batch_size = 32
     coords_1 = torch.tensor(coords_1, dtype=torch.float32, device=device).unsqueeze(0)
     coords = torch.repeat_interleave(coords_1, batch_size, dim=0)
     input_scan_1 = torch.tensor(input_scan_1, dtype=torch.float32, device=device).unsqueeze(0)  # Add batch dimension
     # Dummy input tensor for batch of two subjects
     x = torch.repeat_interleave(input_scan_1, batch_size, dim=0).unsqueeze(1)
+
+    jepa_mask = True
+    mask_token = nn.Parameter(torch.randn(1, embed_dim)).to(device)
+    num_masks = 50
+    mask_size = 100
+
     print("Number of parameters:", count_params(model))
     model.train()
     for i in range(10):
@@ -231,7 +253,7 @@ if __name__ == "__main__":
         print("x shape:", x.shape)
         print("coords shape:", coords.shape)
         # Forward pass
-        output = model(x, coords)
+        output = model(x, coords, jepa_mask, num_masks, mask_size, mask_token)
         print("Output shape:", output.shape)
 
         # Create a virtual target tensor of the same shape as the output
