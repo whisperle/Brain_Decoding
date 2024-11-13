@@ -1,3 +1,4 @@
+import math
 import os
 import numpy as np
 from torchvision import transforms
@@ -17,54 +18,256 @@ sys.path.append('../')
 from backbone import BrainNAT
 
 
-class BrainNetwork(nn.Module):
-    def __init__(self, h=4096, in_dim=15724, out_dim=768, seq_len=2, n_blocks=4, drop=.15, clip_size=768, blurry_recon=True, clip_scale=1, mixer=True):
+# class BrainNetwork(nn.Module):
+#     def __init__(self, h=4096, in_dim=15724, out_dim=768, seq_len=2, n_blocks=4, drop=.15, clip_size=768, blurry_recon=True, clip_scale=1, mixer=True):
+#         super().__init__()
+#         self.seq_len = seq_len
+#         self.h = h
+#         self.clip_size = clip_size
+#         self.blurry_recon = blurry_recon
+#         self.clip_scale = clip_scale
+#         self.mixer = mixer
+        
+#         if mixer:
+#             self.mixer_blocks1 = nn.ModuleList([
+#                 self.mixer_block1(h, drop) for _ in range(n_blocks)
+#             ])
+#             self.mixer_blocks2 = nn.ModuleList([
+#                 self.mixer_block2(seq_len, drop) for _ in range(n_blocks)
+#             ])
+        
+#         # Output linear layer
+#         self.backbone_linear = nn.Linear(h * seq_len, out_dim, bias=True) 
+#         self.clip_proj = self.projector(clip_size, clip_size, h=clip_size)
+        
+#         if self.blurry_recon:
+#             self.blin1 = nn.Linear(h*seq_len,4*28*28,bias=True)
+#             self.bdropout = nn.Dropout(.3)
+#             self.bnorm = nn.GroupNorm(1, 64)
+#             self.bupsampler = Decoder(
+#                 in_channels=64,
+#                 out_channels=4,
+#                 up_block_types=["UpDecoderBlock2D","UpDecoderBlock2D","UpDecoderBlock2D"],
+#                 block_out_channels=[32, 64, 128],
+#                 layers_per_block=1,
+#             )
+#             self.b_maps_projector = nn.Sequential(
+#                 nn.Conv2d(64, 512, 1, bias=False),
+#                 nn.GroupNorm(1,512),
+#                 nn.ReLU(True),
+#                 nn.Conv2d(512, 512, 1, bias=False),
+#                 nn.GroupNorm(1,512),
+#                 nn.ReLU(True),
+#                 nn.Conv2d(512, 512, 1, bias=True),
+#             )
+
+#     def projector(self, in_dim, out_dim, h=2048):
+#         return nn.Sequential(
+#             nn.LayerNorm(in_dim),
+#             nn.GELU(),
+#             nn.Linear(in_dim, h),
+#             nn.LayerNorm(h),
+#             nn.GELU(),
+#             nn.Linear(h, h),
+#             nn.LayerNorm(h),
+#             nn.GELU(),
+#             nn.Linear(h, out_dim)
+#         )
+    
+#     def mlp(self, in_dim, out_dim, drop):
+#         return nn.Sequential(
+#             nn.Linear(in_dim, out_dim),
+#             nn.GELU(),
+#             nn.Dropout(drop),
+#             nn.Linear(out_dim, out_dim),
+#         )
+    
+#     def mixer_block1(self, h, drop):
+#         return nn.Sequential(
+#             nn.LayerNorm(h),
+#             self.mlp(h, h, drop),  # Token mixing
+#         )
+
+#     def mixer_block2(self, seq_len, drop):
+#         return nn.Sequential(
+#             nn.LayerNorm(seq_len),
+#             self.mlp(seq_len, seq_len, drop)  # Channel mixing
+#         )
+        
+#     def forward(self, x):
+#         # make empty tensors with proper batch size
+#         batch_size = x.shape[0]
+#         c = torch.zeros((batch_size, 1), device=x.device)
+#         b = torch.zeros((batch_size, 2, 1), device=x.device)
+        
+#         if self.mixer:
+#             # Mixer blocks
+#             residual1 = x
+#             residual2 = x.permute(0,2,1)
+#             for block1, block2 in zip(self.mixer_blocks1,self.mixer_blocks2):
+#                 x = block1(x) + residual1
+#                 residual1 = x
+#                 x = x.permute(0,2,1)
+                
+#                 x = block2(x) + residual2
+#                 residual2 = x
+#                 x = x.permute(0,2,1)
+                
+#         x = x.reshape(batch_size, -1)
+#         backbone = self.backbone_linear(x).reshape(batch_size, -1, self.clip_size)
+#         if self.clip_scale>0:
+#             c = self.clip_proj(backbone)
+
+#         if self.blurry_recon:
+#             b = self.blin1(x)
+#             b = self.bdropout(b)
+#             b = b.reshape(b.shape[0], -1, 7, 7).contiguous()
+#             b = self.bnorm(b)
+#             b_aux = self.b_maps_projector(b).flatten(2).permute(0,2,1)
+#             b_aux = b_aux.view(batch_size, 49, 512)
+#             b = (self.bupsampler(b), b_aux)
+        
+#         return backbone, c, b
+
+
+
+class MultiheadAttention(nn.Module):
+    def __init__(self,
+                 hidden_size,
+                 num_attention_heads,
+                 encoder_hidden_size=None,
+                 attention_probs_dropout_prob=0.0,
+                 position_embedding_type="absolute",
+                 max_position_embeddings=256,
+                 is_cross_attention=False):
+        super().__init__()
+        # if config.hidden_size % config.num_attention_heads != 0 and not hasattr(config, "embedding_size"):
+        if hidden_size % num_attention_heads != 0 :
+            raise ValueError(
+                "The hidden size (%d) is not a multiple of the number of attention heads (%d)"
+                % (hidden_size, num_attention_heads)
+            )
+
+        self.num_attention_heads = num_attention_heads
+        self.attention_head_size = int(hidden_size / num_attention_heads)
+        self.all_head_size = self.num_attention_heads * self.attention_head_size
+
+        self.query = nn.Linear(hidden_size, self.all_head_size)
+        if is_cross_attention:
+            self.key = nn.Linear(encoder_hidden_size, self.all_head_size)
+            self.value = nn.Linear(encoder_hidden_size, self.all_head_size)
+        else:
+            self.key = nn.Linear(hidden_size, self.all_head_size)
+            self.value = nn.Linear(hidden_size, self.all_head_size)
+
+        self.dropout = nn.Dropout(attention_probs_dropout_prob)
+
+        self.position_embedding_type = position_embedding_type
+        # self.position_embedding_type = getattr(config, "position_embedding_type", "absolute")
+
+    def transpose_for_scores(self, x):
+        new_x_shape = x.size()[:-1] + (self.num_attention_heads, self.attention_head_size)
+        x = x.view(*new_x_shape)
+        return x.permute(0, 2, 1, 3)
+
+    def forward(
+        self,
+        hidden_states,
+        encoder_hidden_states=None,
+    ):
+        # If this is instantiated as a cross-attention module, the keys
+        # and values come from an encoder; the attention mask needs to be
+        # such that the encoder's padding tokens are not attended to.
+        is_cross_attention = encoder_hidden_states is not None
+
+        if is_cross_attention:
+            key_layer = self.transpose_for_scores(self.key(encoder_hidden_states))
+            value_layer = self.transpose_for_scores(self.value(encoder_hidden_states))
+        else:
+            key_layer = self.transpose_for_scores(self.key(hidden_states))
+            value_layer = self.transpose_for_scores(self.value(hidden_states))
+
+        mixed_query_layer = self.query(hidden_states)
+
+        query_layer = self.transpose_for_scores(mixed_query_layer)
+
+
+        # Take the dot product between "query" and "key" to get the raw attention scores.
+        attention_scores = torch.matmul(query_layer, key_layer.transpose(-1, -2))
+        attention_scores = attention_scores / math.sqrt(self.attention_head_size)
+
+        # Normalize the attention scores to probabilities.
+        attention_probs = nn.Softmax(dim=-1)(attention_scores)
+
+        # This is actually dropping out entire tokens to attend to, which might
+        # seem a bit unusual, but is taken from the original Transformer paper.
+        attention_probs_dropped = self.dropout(attention_probs)
+
+        context_layer = torch.matmul(attention_probs_dropped, value_layer)
+
+        context_layer = context_layer.permute(0, 2, 1, 3).contiguous()
+        new_context_layer_shape = context_layer.size()[:-2] + (self.all_head_size,)
+        context_layer = context_layer.view(*new_context_layer_shape)
+        return context_layer
+
+# Copied from transformers.models.bert.modeling_bert.BertSelfOutput with Bert->Blip2QFormer
+class TransformerProjector(nn.Module):
+    def __init__(self, dim, dropout=0.1):
+        super().__init__()
+        self.dense = nn.Linear(dim, dim)
+        self.LayerNorm = nn.LayerNorm(dim, eps=1e-6)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, hidden_states: torch.Tensor, input_tensor: torch.Tensor) -> torch.Tensor:
+        hidden_states = self.dense(hidden_states)
+        hidden_states = self.dropout(hidden_states)
+        hidden_states = self.LayerNorm(hidden_states + input_tensor)
+        return hidden_states
+
+class TransformerBlock(nn.Module):
+    def __init__(self, dim, cross_dim, num_heads, mlp_dim, max_seq_len, dropout=0.1):
+        super().__init__()
+        self.cross_attn = MultiheadAttention(
+            dim,
+            num_heads,
+            cross_dim,
+            dropout=dropout,
+            max_position_embeddings=max_seq_len,
+            is_cross_attention=True,
+        )
+        self.projector_1 = TransformerProjector(dim, mlp_dim, dropout=dropout)
+
+        self.self_attn = MultiheadAttention(mlp_dim, num_heads, dropout=dropout)
+        self.projector_2 = TransformerProjector(mlp_dim, dim, dropout=dropout)
+
+    def forward(self, x, cross_attn_input):
+        x = self.projector_1(self.cross_attn(x, cross_attn_input), x)
+        x = self.projector_2(self.self_attn(x), x)
+        return x
+    
+class SpatialAwareBrainNetwork(nn.Module):
+    # TODO
+    def __init__(
+        self,
+        h=4096,
+        out_dim=768,
+        seq_len=256,
+        n_blocks=4,
+        num_heads=4,
+        drop=0.15,
+        blurry_recon=True,
+        clip_scale=1
+    ):
         super().__init__()
         self.seq_len = seq_len
         self.h = h
-        self.clip_size = clip_size
         self.blurry_recon = blurry_recon
         self.clip_scale = clip_scale
-        self.mixer = mixer
-        
-        if mixer:
-            self.mixer_blocks1 = nn.ModuleList([
-                self.mixer_block1(h, drop) for _ in range(n_blocks)
-            ])
-            self.mixer_blocks2 = nn.ModuleList([
-                self.mixer_block2(seq_len, drop) for _ in range(n_blocks)
-            ])
-        
-        # Output linear layer
-        self.backbone_linear = nn.Linear(h * seq_len, out_dim, bias=True) 
-        self.clip_proj = self.projector(clip_size, clip_size, h=clip_size)
-        
-        if self.blurry_recon:
-            self.blin1 = nn.Linear(h*seq_len,4*28*28,bias=True)
-            self.bdropout = nn.Dropout(.3)
-            self.bnorm = nn.GroupNorm(1, 64)
-            self.bupsampler = Decoder(
-                in_channels=64,
-                out_channels=4,
-                up_block_types=["UpDecoderBlock2D","UpDecoderBlock2D","UpDecoderBlock2D"],
-                block_out_channels=[32, 64, 128],
-                layers_per_block=1,
-            )
-            self.b_maps_projector = nn.Sequential(
-                nn.Conv2d(64, 512, 1, bias=False),
-                nn.GroupNorm(1,512),
-                nn.ReLU(True),
-                nn.Conv2d(512, 512, 1, bias=False),
-                nn.GroupNorm(1,512),
-                nn.ReLU(True),
-                nn.Conv2d(512, 512, 1, bias=True),
-            )
-            
-    def projector(self, in_dim, out_dim, h=2048):
-        return nn.Sequential(
-            nn.LayerNorm(in_dim),
+        self.queries = nn.Parameter(torch.randn(1, seq_len, out_dim))
+        self.projector = nn.Sequential( # follows original design of mindeye
+            nn.LayerNorm(out_dim),
             nn.GELU(),
-            nn.Linear(in_dim, h),
+            nn.Linear(out_dim, h),
             nn.LayerNorm(h),
             nn.GELU(),
             nn.Linear(h, h),
@@ -72,62 +275,57 @@ class BrainNetwork(nn.Module):
             nn.GELU(),
             nn.Linear(h, out_dim)
         )
-    
-    def mlp(self, in_dim, out_dim, drop):
-        return nn.Sequential(
-            nn.Linear(in_dim, out_dim),
-            nn.GELU(),
-            nn.Dropout(drop),
-            nn.Linear(out_dim, out_dim),
-        )
-    
-    def mixer_block1(self, h, drop):
-        return nn.Sequential(
-            nn.LayerNorm(h),
-            self.mlp(h, h, drop),  # Token mixing
-        )
+        self.attention_blocks = nn.ModuleList([
+            TransformerBlock(out_dim, h, num_heads, h, seq_len, drop) for _ in range(n_blocks)
+        ])
 
-    def mixer_block2(self, seq_len, drop):
-        return nn.Sequential(
-            nn.LayerNorm(seq_len),
-            self.mlp(seq_len, seq_len, drop)  # Channel mixing
-        )
+
+        assert self.blurry_recon == False, "Blurry recon not implemented yet"
+        # if self.blurry_recon:
+        #     self.blin1 = nn.Linear(h*seq_len,4*28*28,bias=True)
+        #     self.bdropout = nn.Dropout(.3)
+        #     self.bnorm = nn.GroupNorm(1, 64)
+        #     self.bupsampler = Decoder(
+        #         in_channels=64,
+        #         out_channels=4,
+        #         up_block_types=["UpDecoderBlock2D","UpDecoderBlock2D","UpDecoderBlock2D"],
+        #         block_out_channels=[32, 64, 128],
+        #         layers_per_block=1,
+        #     )
+        #     self.b_maps_projector = nn.Sequential(
+        #         nn.Conv2d(64, 512, 1, bias=False),
+        #         nn.GroupNorm(1,512),
+        #         nn.ReLU(True),
+        #         nn.Conv2d(512, 512, 1, bias=False),
+        #         nn.GroupNorm(1,512),
+        #         nn.ReLU(True),
+        #         nn.Conv2d(512, 512, 1, bias=True),
+        #     )
         
     def forward(self, x):
         # make empty tensors with proper batch size
         batch_size = x.shape[0]
-        c = torch.zeros((batch_size, 1), device=x.device)
-        b = torch.zeros((batch_size, 2, 1), device=x.device)
-        
-        if self.mixer:
-            # Mixer blocks
-            residual1 = x
-            residual2 = x.permute(0,2,1)
-            for block1, block2 in zip(self.mixer_blocks1,self.mixer_blocks2):
-                x = block1(x) + residual1
-                residual1 = x
-                x = x.permute(0,2,1)
-                
-                x = block2(x) + residual2
-                residual2 = x
-                x = x.permute(0,2,1)
-                
-        x = x.reshape(batch_size, -1)
-        backbone = self.backbone_linear(x).reshape(batch_size, -1, self.clip_size)
+        backbone = self.queries.repeat(batch_size, 1, 1)
+        for attention_block in self.attention_blocks:
+            backbone = attention_block(backbone, x)
+    
         if self.clip_scale>0:
             c = self.clip_proj(backbone)
-
-        if self.blurry_recon:
-            b = self.blin1(x)
-            b = self.bdropout(b)
-            b = b.reshape(b.shape[0], -1, 7, 7).contiguous()
-            b = self.bnorm(b)
-            b_aux = self.b_maps_projector(b).flatten(2).permute(0,2,1)
-            b_aux = b_aux.view(batch_size, 49, 512)
-            b = (self.bupsampler(b), b_aux)
+            
+        assert self.blurry_recon == False, "Blurry recon not implemented yet"
+        # b = torch.zeros((batch_size, 2, 1), device=x.device)
+        # if self.blurry_recon:
+        #     b = self.blin1(x)
+        #     b = self.bdropout(b)
+        #     b = b.reshape(b.shape[0], -1, 7, 7).contiguous()
+        #     b = self.bnorm(b)
+        #     b_aux = self.b_maps_projector(b).flatten(2).permute(0,2,1)
+        #     b_aux = b_aux.view(batch_size, 49, 512)
+        #     b = (self.bupsampler(b), b_aux)
         
         return backbone, c, b
     
+
 class Clipper(torch.nn.Module):
     def __init__(self, clip_variant, clamp_embs=False, norm_embs=False,
                  hidden_state=False, device=torch.device('cpu')):
@@ -485,7 +683,6 @@ class PriorNetwork(nn.Module):
 
         # mask out brain embeddings with null brain embeddings
 
-        # import pdb; pdb.set_trace()
         null_brain_embeds = self.null_brain_embeds.to(brain_embed.dtype)
         brain_embed = torch.where(
             brain_keep_mask,
@@ -852,20 +1049,19 @@ class NAT_BrainNet(nn.Module):
         
         # Add Adaptive Max Pooling to get fixed size feature vector
         pool_dim = 64
-        self.voxel_adaptor = nn.AdaptiveMaxPool1d(pool_dim)
-        self.embed_linear = nn.Linear(hidden_dim_nat*pool_dim, args.hidden_dim)
+        # self.voxel_adaptor = nn.AdaptiveMaxPool1d(pool_dim) 
+        # self.embed_linear = nn.Linear(hidden_dim_nat*pool_dim, args.hidden_dim)
         
         # Brain Network backbone
-        self.backbone = BrainNetwork(
+        self.backbone = SpatialAwareBrainNetwork(
             h=args.hidden_dim, 
-            in_dim=args.hidden_dim,
-            seq_len=1,
-            n_blocks=args.n_blocks,
-            clip_size=clip_emb_dim,
-            out_dim=clip_emb_dim * clip_seq_dim,
+            out_dim=clip_emb_dim,
+            seq_len=clip_seq_dim,
+            n_blocks=args.n_blocks_decoder,
+            num_heads=args.num_heads,
+            drop=args.drop,
             blurry_recon=args.blurry_recon,
             clip_scale=args.clip_scale,
-            mixer=args.use_mixer
         )
         
         # Optional Prior Network
@@ -899,13 +1095,34 @@ class NAT_BrainNet(nn.Module):
 
     def forward(self, x, coords):
         # NAT backbone processing
+        # step 1--input , brain signal input : features of 3d brain points
+        # step 2--attention with 3d coordinate positional embedding , brain signal input : (processed) features of 3d brain points
+        # x: (bsz, n_points, feature_dim) coords: (bsz, n_points, 3)
         x = self.nat(x, coords)
-        x = x.permute(0, 2, 1)
-        x = self.voxel_adaptor(x)
-        x = self.embed_linear(x.flatten(1)).unsqueeze(1)
         
+        # step- 3--voxel adaptor, brain signal input : (processed) features of 3d brain points
+        # x: (bsz, n_points - tome_r * m, feature_dim_1) coords: (bsz, n_points, 3)
+        # How to design the voxel adaptor?
+        # TODO: Design our own BrainNet voxel adaptor -- pooling attention based 
+        # 1. Output sequence length should be fixed for different input sequences-[brain voxel points differs among subjects]
+        # 2. Output sequence could be map back to 3d brain voxel points
+        # Potentially:
+        # 1. 3d attention pooling -- pure learning based
+        #   embedding_pool (seq_len, feature_dim_1), example: Seq_len = latent_h * latent_w
+        #   pooling output: (seq_len, feature_dim_2)
+        # 2. output_shape: (bsz, clip_seq_len, clip_dim)
+        # 3. aside from this, preserves all feature of the original BrainNet
+        
+
+        # x = x.permute(0, 2, 1)
+        # x = self.voxel_adaptor(x)
+        # x = self.embed_linear(x.flatten(1)).unsqueeze(1)
+
         # Brain Network processing
         backbone, clip_voxels, blurry_image_enc = self.backbone(x)
+        import pdb; pdb.set_trace()
+        # backbone shaped (bsz, 256, clip_dim)
+        # clip_voxels shaped (bsz, 256, clip_dim)
         
         # Add shape assertions for debugging
         batch_size = x.shape[0]

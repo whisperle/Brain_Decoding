@@ -6,6 +6,7 @@ from attention import NearestNeighborAttention
 from tome_customize import TokenMerging
 
 class ConvTokenizer1D(nn.Module):
+    # TODO: small change , elimate norm
     def __init__(self, in_chans=1, embed_dim=96, norm_layer=None):
         super().__init__()
         self.proj = nn.Sequential(
