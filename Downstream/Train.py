@@ -20,7 +20,8 @@ from torchvision import transforms
 from accelerate import Accelerator
 import kornia
 from kornia.augmentation.container import AugmentationSequential
-from models import NAT_BrainNet
+# from models import NAT_BrainNe
+from attention_decoders import NAT_BrainNet
 # Add the path for SDXL unCLIP requirements
 sys.path.append('generative_models/')
 import sgm
@@ -176,6 +177,14 @@ def parse_arguments():
         "--full_attention", action="store_true",
         help="Whether to use full attention in BrainNAT",
     )
+    parser.add_argument(
+        "--n_blocks_decoder", type=int, default=4,
+        help="Number of blocks in the decoder",
+    )
+    parser.add_argument(
+        "--drop", type=float, default=0.1,
+        help="Dropout rate for the model",
+    )
     args = parser.parse_args()
     return args
 
@@ -255,23 +264,35 @@ def setup_optimizer(args, model, num_iterations_per_epoch):
 
     # Group parameters for NAT backbone
     opt_grouped_parameters = [
-        {'params': [p for n, p in model.nat.named_parameters() if not any(nd in n for nd in no_decay)],
+        {'params': [p for n, p in model.brain_nat.named_parameters() if not any(nd in n for nd in no_decay)],
          'weight_decay': 1e-2},
-        {'params': [p for n, p in model.nat.named_parameters() if any(nd in n for nd in no_decay)],
+        {'params': [p for n, p in model.brain_nat.named_parameters() if any(nd in n for nd in no_decay)],
          'weight_decay': 0.0},
     ]
+    if hasattr(model, 'feature_mapper'):
+        opt_grouped_parameters.extend([
+            {'params': [p for n, p in model.feature_mapper.named_parameters() if not any(nd in n for nd in no_decay)],
+             'weight_decay': 1e-2},
+            {'params': [p for n, p in model.feature_mapper.named_parameters() if any(nd in n for nd in no_decay)],
+             'weight_decay': 0.0},
+        ])
 
-    # Add voxel adaptor and embed linear parameters
-    opt_grouped_parameters.extend([
-        {'params': [p for n, p in model.voxel_adaptor.named_parameters() if not any(nd in n for nd in no_decay)],
-         'weight_decay': 1e-2},
-        {'params': [p for n, p in model.voxel_adaptor.named_parameters() if any(nd in n for nd in no_decay)],
-         'weight_decay': 0.0},
-        {'params': [p for n, p in model.embed_linear.named_parameters() if not any(nd in n for nd in no_decay)],
-         'weight_decay': 1e-2}, 
-        {'params': [p for n, p in model.embed_linear.named_parameters() if any(nd in n for nd in no_decay)],
-         'weight_decay': 0.0},
-    ])
+    # Add voxel adaptor and embed linear parameters if they exist
+    if hasattr(model, 'voxel_adaptor'):
+        opt_grouped_parameters.extend([
+            {'params': [p for n, p in model.voxel_adaptor.named_parameters() if not any(nd in n for nd in no_decay)],
+             'weight_decay': 1e-2},
+            {'params': [p for n, p in model.voxel_adaptor.named_parameters() if any(nd in n for nd in no_decay)],
+             'weight_decay': 0.0},
+        ])
+    
+    if hasattr(model, 'embed_linear'):
+        opt_grouped_parameters.extend([
+            {'params': [p for n, p in model.embed_linear.named_parameters() if not any(nd in n for nd in no_decay)],
+             'weight_decay': 1e-2}, 
+            {'params': [p for n, p in model.embed_linear.named_parameters() if any(nd in n for nd in no_decay)],
+             'weight_decay': 0.0},
+        ])
 
     # Add backbone parameters
     opt_grouped_parameters.extend([
@@ -280,6 +301,23 @@ def setup_optimizer(args, model, num_iterations_per_epoch):
         {'params': [p for n, p in model.backbone.named_parameters() if any(nd in n for nd in no_decay)],
          'weight_decay': 0.0},
     ])
+
+    # Add blurry recon parameters if enabled
+    if args.blurry_recon:
+        opt_grouped_parameters.extend([
+            {'params': [p for n, p in model.backbone.blin1.named_parameters() if not any(nd in n for nd in no_decay)],
+             'weight_decay': 1e-2},
+            {'params': [p for n, p in model.backbone.blin1.named_parameters() if any(nd in n for nd in no_decay)],
+             'weight_decay': 0.0},
+            {'params': [p for n, p in model.backbone.b_maps_projector.named_parameters() if not any(nd in n for nd in no_decay)],
+             'weight_decay': 1e-2},
+            {'params': [p for n, p in model.backbone.b_maps_projector.named_parameters() if any(nd in n for nd in no_decay)],
+             'weight_decay': 0.0},
+            {'params': [p for n, p in model.backbone.bupsampler.named_parameters() if not any(nd in n for nd in no_decay)],
+             'weight_decay': 1e-2},
+            {'params': [p for n, p in model.backbone.bupsampler.named_parameters() if any(nd in n for nd in no_decay)],
+             'weight_decay': 0.0},
+        ])
 
     # Add prior network parameters if enabled
     if args.use_prior:
