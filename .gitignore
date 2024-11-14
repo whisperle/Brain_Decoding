@@ -10,7 +10,8 @@ wandb/
 train_logs/
 
 # ckpt
-ckpt/
+pretraining/ckpt/
+pretraining/wandb/
 
 # test files
 **/test*

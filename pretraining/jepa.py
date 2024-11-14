@@ -48,7 +48,7 @@ def parse_arguments():
         help="Whether to log to wandb",
     )
     parser.add_argument(
-        "--wandb_project", type=str, default="BRAIN_NAT",
+        "--wandb_project", type=str, default="BRAIN_NAT_Pretraining",
         help="wandb project name",
     )
     parser.add_argument(
@@ -72,7 +72,7 @@ def parse_arguments():
         help="Save backup checkpoint and reconstruct every x epochs",
     )
     parser.add_argument(
-        "--ckpt_path", type=str, default="/scratch/cc6946/projects/Brain_Decoding/ckpt"
+        "--ckpt_path", type=str, default="/scratch/cc6946/projects/Brain_Decoding/pretraining/ckpt"
     )
     parser.add_argument(
         "--num_heads", type=int, default=4,
@@ -146,7 +146,7 @@ for p in target_encoder.parameters():
 # mask token
 embed_dim = 2 ** int(torch.log2(torch.tensor(hidden_dim_nat)).ceil().item())
 mask_token = nn.Parameter(torch.randn(1, embed_dim, device=device))
-
+embed()
 # create dataloader
 data_type = torch.float16
 train_data = MindEye2Dataset(args, data_type, 'train')
@@ -200,7 +200,7 @@ def save_checkpoint(epoch, path):
     try:
         torch.save(save_dict, os.path.join(path, f'{args.model_name}_epoch_{epoch}.pth'))
     except Exception as e:
-        logger.info(f'Encountered exception when saving checkpoint: {e}')
+        print(f'Encountered exception when saving checkpoint: {e}')
 
 ####################################### Training Loop #######################################
 if args.wandb_log:
@@ -249,4 +249,6 @@ for epoch in range(args.num_epochs):
         wandb.log({"Average Loss per Epoch": avg_loss})
 
     if args.ckpt_saving and (epoch % args.ckpt_interval == 0 or epoch == (args.num_epochs - 1)):
-        save_checkpoint(epoch + 1, args.ckpt_path)
+        ckpt_path = os.path.join(args.ckpt_path, args.model_name)
+        os.makedirs(ckpt_path, exist_ok=True)
+        save_checkpoint(epoch + 1, ckpt_path)
