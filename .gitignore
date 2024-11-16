@@ -64,3 +64,4 @@ coverage.xml
 docs/_build/
 
 tmp/
+*.out

@@ -34,7 +34,7 @@ class CrossSelfAttentionLayer(nn.Module):
             )
 
         self.num_attention_heads = num_attention_heads
-        self.attention_head_size = int(hidden_size / num_attention_heads)
+        self.attention_head_size = hidden_size // num_attention_heads
         self.all_head_size = self.num_attention_heads * self.attention_head_size
 
         self.query = nn.Linear(hidden_size, self.all_head_size)
@@ -48,12 +48,6 @@ class CrossSelfAttentionLayer(nn.Module):
             self.value = nn.Linear(hidden_size, self.all_head_size)
 
         self.dropout = nn.Dropout(attention_probs_dropout_prob)
-        self.position_embedding_type = position_embedding_type
-
-    def transpose_for_scores(self, x):
-        new_x_shape = x.size()[:-1] + (self.num_attention_heads, self.attention_head_size)
-        x = x.view(*new_x_shape)
-        return x.permute(0, 2, 1, 3)
 
     def forward(
         self,
@@ -62,26 +56,30 @@ class CrossSelfAttentionLayer(nn.Module):
     ):
         is_cross_attention = encoder_hidden_states is not None
 
-        mixed_query_layer = self.query(hidden_states)
-        query_layer = self.transpose_for_scores(mixed_query_layer)
-
+        query_layer = self.query(hidden_states)
         if is_cross_attention:
-            key_layer = self.transpose_for_scores(self.key(encoder_hidden_states))
-            value_layer = self.transpose_for_scores(self.value(encoder_hidden_states))
+            key_layer = self.key(encoder_hidden_states)
+            value_layer = self.value(encoder_hidden_states)
         else:
-            key_layer = self.transpose_for_scores(self.key(hidden_states))
-            value_layer = self.transpose_for_scores(self.value(hidden_states))
+            key_layer = self.key(hidden_states)
+            value_layer = self.value(hidden_states)
 
-        attention_scores = torch.matmul(query_layer, key_layer.transpose(-1, -2))
-        attention_scores = attention_scores / math.sqrt(self.attention_head_size)
-        attention_probs = nn.functional.softmax(attention_scores, dim=-1)
-        attention_probs = self.dropout(attention_probs)
+        # Reshape for multi-head attention
+        batch_size, seq_length, _ = query_layer.size()
+        query_layer = query_layer.view(batch_size, seq_length, self.num_attention_heads, self.attention_head_size).transpose(1, 2)
+        key_layer = key_layer.view(batch_size, -1, self.num_attention_heads, self.attention_head_size).transpose(1, 2)
+        value_layer = value_layer.view(batch_size, -1, self.num_attention_heads, self.attention_head_size).transpose(1, 2)
 
-        context_layer = torch.matmul(attention_probs, value_layer)
-        context_layer = context_layer.permute(0, 2, 1, 3).contiguous()
+        # Scaled dot-product attention
+        context_layer = torch.nn.functional.scaled_dot_product_attention(
+            query_layer, key_layer, value_layer, dropout_p=self.dropout.p
+        )
+
+        # Reshape context to original format
+        context_layer = context_layer.transpose(1, 2).contiguous()
         new_context_layer_shape = context_layer.size()[:-2] + (self.all_head_size,)
         context_layer = context_layer.view(*new_context_layer_shape)
-        
+
         return context_layer
 
 class ResidualConnectionLayer(nn.Module):
@@ -96,7 +94,7 @@ class ResidualConnectionLayer(nn.Module):
         hidden_states = self.dropout(hidden_states)
         hidden_states = self.LayerNorm(hidden_states + input_tensor)
         return hidden_states
-
+    
 class CrossSelfAttentionBlock(nn.Module):
     def __init__(self, dim, cross_dim, num_heads, mlp_dim, max_seq_len, dropout=0.1):
         super().__init__()
@@ -141,21 +139,25 @@ class SpatialAwareBrainNetwork(nn.Module):
         self.clip_scale = clip_scale
         
         # Initialize learnable queries
-        self.queries = nn.Parameter(torch.randn(1, seq_len, out_dim))
+        self.queries = nn.Parameter(torch.randn(1, seq_len, h))
         
         # Attention blocks
         self.attention_blocks = nn.ModuleList([
-            CrossSelfAttentionBlock(out_dim, h, num_heads, h, seq_len, drop) 
+            CrossSelfAttentionBlock(h, h, num_heads, h, seq_len, drop) 
             for _ in range(n_blocks)
         ])
-
+        self.backbone_head = nn.ModuleList([
+            ResidualConnectionLayer(h, h),
+            ResidualConnectionLayer(h, h),   
+        ])
+        self.backbone_proj = nn.Linear(h, out_dim)
         # Optionally remove or adjust the clip projection if avoiding MLPs
         if clip_scale > 0:
-            self.clip_proj = nn.Sequential(
-                nn.LayerNorm(out_dim),
-                nn.GELU(),
-                nn.Linear(out_dim, out_dim)
-            )
+            self.clip_head = nn.ModuleList([
+                ResidualConnectionLayer(h, h),
+                ResidualConnectionLayer(h, h),   
+            ])
+            self.clip_proj = nn.Linear(h, out_dim)
         else:
             self.clip_proj = None
 
@@ -183,19 +185,28 @@ class SpatialAwareBrainNetwork(nn.Module):
     def forward(self, x):
         batch_size = x.shape[0]
         # Expand queries to batch size
-        backbone = self.queries.repeat(batch_size, 1, 1)
+        cross_attn_output = self.queries.repeat(batch_size, 1, 1)
         
         # Apply attention blocks
         for i, attention_block in enumerate(self.attention_blocks):
-            backbone = attention_block(backbone, x)
+            cross_attn_output = attention_block(cross_attn_output, x)
             # Debugging shapes
             # print(f"Backbone shape after attention block {i}: {backbone.shape}")
-
+            
+        backbone = cross_attn_output
+        # backbone output
+        for head in self.backbone_head:
+            backbone = head(backbone, backbone)
+            
+        backbone = self.backbone_proj(backbone)
         # CLIP projection if enabled
         if self.clip_proj is not None:
-            c = self.clip_proj(backbone)
+            c = cross_attn_output
+            for head in self.clip_head:
+                c = head(c, c)
+            c = self.clip_proj(cross_attn_output)
         else:
-            c = backbone  # Or handle accordingly if clip_proj is None
+            c = cross_attn_output  # Or handle accordingly if clip_proj is None
 
         # Initialize blurry reconstruction
         b = torch.zeros((batch_size, 2, 1), device=x.device)
@@ -218,10 +229,9 @@ class NAT_BrainNet(nn.Module):
         super(NAT_BrainNet, self).__init__()
         
         # NAT backbone feature extractor
-        hidden_dim_nat = args.hidden_dim
         self.brain_nat = BrainNAT(
             in_chans=1,
-            embed_dim=hidden_dim_nat,
+            embed_dim=args.encoder_hidden_dim,
             depth=args.nat_depth,
             num_heads=args.num_heads,
             num_neighbors=args.nat_num_neighbors,
@@ -235,11 +245,11 @@ class NAT_BrainNet(nn.Module):
         )
         
         # # Linear layer to map brain_nat output to clip_emb_dim
-        # self.feature_mapper = nn.Linear(hidden_dim_nat, clip_emb_dim)
+        self.feature_mapper = nn.Linear(args.encoder_hidden_dim, args.decoder_hidden_dim)
 
         # Brain Network backbone
         self.backbone = SpatialAwareBrainNetwork(
-            h=args.hidden_dim,       # Dimension of brain_nat output
+            h=args.decoder_hidden_dim,       # Dimension of brain_nat output
             out_dim=clip_emb_dim,    # Desired output dimension
             seq_len=clip_seq_dim,
             n_blocks=args.n_blocks_decoder,
@@ -281,7 +291,7 @@ class NAT_BrainNet(nn.Module):
     def forward(self, x, coords):
         # NAT backbone processing
         x = self.brain_nat(x, coords)
-        
+        x = self.feature_mapper(x)
         # Map features to clip_emb_dim
         # x = self.feature_mapper(x)
 

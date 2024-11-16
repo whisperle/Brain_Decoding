@@ -122,7 +122,11 @@ def parse_arguments():
         help="Number of blocks in the model",
     )
     parser.add_argument(
-        "--hidden_dim", type=int, default=1024, #todo Try 512
+        "--decoder_hidden_dim", type=int, default=1024, #todo Try 512
+        help="Hidden dimension size",
+    )
+    parser.add_argument(
+        "--encoder_hidden_dim", type=int, default=1024, #todo Try 512
         help="Hidden dimension size",
     )
     parser.add_argument(
@@ -255,6 +259,10 @@ def build_model(args, device, data_type):
     # model = torch.compile(model)
     print("model parameters:")
     utils.count_params(model)
+    print("model.brain_nat")
+    utils.count_params(model.brain_nat)
+    print("model.backbone")
+    utils.count_params(model.backbone)
     
     return clip_img_embedder, model, autoenc, cnx, mean, std, blur_augs
 
@@ -357,6 +365,7 @@ def setup_wandb(args,train_url="", test_url=""):
         import wandb
         print(f"wandb {args.wandb_project} run {args.model_name}")
         wandb.init(
+            entity='nyu_brain_decoding',
             id=args.model_name,
             project=args.wandb_project,
             name=args.model_name,
@@ -611,7 +620,10 @@ def train(args, model, train_dl, test_dl, accelerator, data_type, num_iterations
                         test_loss_prior_total += loss_prior.item()
                         loss_prior *= prior_scale
                         loss += loss_prior
-                        
+                        # TODO: this two line was not tested
+                        recon_cossim += nn.functional.cosine_similarity(prior_out, clip_target).mean().item()
+                        recon_mse += mse(prior_out, clip_target).item()
+                    
                     if clip_scale>0:
                         loss_clip = utils.soft_clip_loss(
                             clip_voxels_norm,
