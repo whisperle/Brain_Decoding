@@ -2,6 +2,9 @@
     MoCo v3 architecture for BrainNAT
     Author: Steven Zhang
 """
+import sys
+sys.path.append('/scratch/cc6946/projects/Brain_Decoding/Downstream')
+sys.path.append('/scratch/cc6946/projects/Brain_Decoding')
 import torch
 import torch.nn as nn
 import os
