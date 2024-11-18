@@ -189,6 +189,18 @@ def parse_arguments():
         "--drop", type=float, default=0.1,
         help="Dropout rate for the model",
     )
+    parser.add_argument(
+        "--progressive_dims", action="store_true",
+        help="Whether to use progressive dimension scaling",
+    )
+    parser.add_argument(
+        "--initial_tokens", type=int, default=15000,
+        help="Initial number of tokens for progressive dimension scaling",
+    )
+    parser.add_argument(
+        "--dim_scale_factor", type=float, default=1.0,
+        help="Power factor for dimension scaling (0.5 = square root scaling)",
+    )
     args = parser.parse_args()
     return args
 
@@ -379,11 +391,9 @@ def setup_wandb(args,train_url="", test_url=""):
 
 def train(args, model, train_dl, test_dl, accelerator, data_type, num_iterations_per_epoch,
           num_test, subj_list, clip_img_embedder, optimizer, lr_scheduler, wandb_log, autoenc, cnx, mean, std,
-          blur_augs):
+          blur_augs, epoch_start=0, losses=None, test_losses=None, lrs=None):
+    
     device = accelerator.device
-    epoch = 0
-    losses, test_losses, lrs = [], [], []
-    best_test_loss = 1e9
     num_epochs = args.num_epochs
     batch_size = args.batch_size
     ckpt_interval = args.ckpt_interval
@@ -399,11 +409,22 @@ def train(args, model, train_dl, test_dl, accelerator, data_type, num_iterations
 
     model, optimizer, train_dl, lr_scheduler = accelerator.prepare(model, optimizer, train_dl, lr_scheduler)
 
-    accelerator.print(f"{model_name} starting with epoch {epoch} / {num_epochs}")
-    epoch_progress = tqdm(range(epoch,num_epochs), disable=not accelerator.is_local_main_process)
+    accelerator.print(f"{model_name} starting with epoch {epoch_start} / {num_epochs}")
     mse = nn.MSELoss()
     l1 = nn.L1Loss()
     soft_loss_temps = utils.cosine_anneal(0.004, 0.0075, num_epochs - int(mixup_pct * num_epochs))
+
+    # Initialize tracking lists if not provided
+    losses = losses if losses is not None else []
+    test_losses = test_losses if test_losses is not None else []
+    lrs = lrs if lrs is not None else []
+
+    # Training loop
+    epoch_progress = tqdm(
+        range(epoch_start, num_epochs), 
+        disable=not accelerator.is_local_main_process
+    )
+    
     for epoch in epoch_progress:
         model.train()
         iteration = 0
@@ -719,41 +740,106 @@ def train(args, model, train_dl, test_dl, accelerator, data_type, num_iterations
 def main():
     torch._dynamo.config.optimize_ddp=False
     args = parse_arguments()
-    wandb_log = setup_wandb(args)#,train_url="", test_url="")  # Update with actual URLs if needed
+    
+    # Initialize accelerator first
+    accelerator = Accelerator(
+        device_placement=True, 
+        split_batches=False, 
+        mixed_precision="fp16",
+        dynamo_backend="no"
+    )
+    
+    # Set up wandb only on main process
+    if accelerator.is_main_process:
+        if args.wandb_log:
+            import wandb
+            # Try to resume wandb run if it exists
+            try:
+                wandb.init(
+                    entity='nyu_brain_decoding',
+                    project=args.wandb_project,
+                    name=args.model_name,
+                    id=args.model_name,
+                    resume="allow",
+                    config=vars(args)
+                )
+                print(f"Resumed wandb run: {wandb.run.path}")
+            except wandb.errors.UsageError:
+                # If run doesn't exist, start new one
+                wandb.init(
+                    entity='nyu_brain_decoding',
+                    project=args.wandb_project,
+                    name=args.model_name,
+                    config=vars(args)
+                )
+                print(f"Started new wandb run: {wandb.run.path}")
     
     utils.seed_everything(args.seed)
     data_type = torch.float16  # Change depending on your mixed_precision
 
+    # Setup multi-GPU training
     local_rank = int(os.getenv('RANK', 0))
     num_devices = torch.cuda.device_count()
     if num_devices == 0:
         num_devices = 1
     args.num_devices = num_devices
-    accelerator = Accelerator(device_placement=True, split_batches=False, mixed_precision="fp16",dynamo_backend="no")
     device = accelerator.device
     batch_size = args.batch_size
 
-    if args.use_image_aug or args.blurry_recon:
-        import kornia
-        from kornia.augmentation.container import AugmentationSequential
-
-    if args.use_image_aug:
-        img_augment = AugmentationSequential(
-            kornia.augmentation.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.4, hue=0.1, p=0.3),
-            same_on_batch=False,
-            data_keys=["input"],
-        )
-    else:
-        img_augment = None
-
+    # Data preparation
     train_dl, test_dl, num_test, num_iterations_per_epoch = prepare_data(args, data_type)
 
+    # Model initialization
     clip_img_embedder, model, autoenc, cnx, mean, std, blur_augs = build_model(args, device, data_type)
     optimizer, lr_scheduler = setup_optimizer(args, model, num_iterations_per_epoch)
 
-    train(args, model, train_dl, test_dl, accelerator, data_type, num_iterations_per_epoch,
-          num_test, [args.subj], clip_img_embedder, optimizer, lr_scheduler, wandb_log, autoenc, cnx, mean, std,
-          blur_augs)
+    # Load checkpoint if exists
+    epoch_start, losses, test_losses, lrs, resumed = utils.load_ckpt(
+        args=args,
+        model=model,
+        optimizer=optimizer,
+        lr_scheduler=lr_scheduler,
+        accelerator=accelerator,
+        tag='last'
+    )
+
+    # Prepare for distributed training
+    model, optimizer, train_dl, lr_scheduler = accelerator.prepare(
+        model, optimizer, train_dl, lr_scheduler
+    )
+
+    # Print training status
+    if resumed:
+        accelerator.print(f"Resuming training from epoch {epoch_start}")
+    else:
+        accelerator.print("Starting new training run")
+        epoch_start = 0
+
+    # Training loop
+    train(
+        args=args,
+        model=model,
+        train_dl=train_dl,
+        test_dl=test_dl,
+        accelerator=accelerator,
+        data_type=data_type,
+        num_iterations_per_epoch=num_iterations_per_epoch,
+        num_test=num_test,
+        subj_list=[args.subj],
+        clip_img_embedder=clip_img_embedder,
+        optimizer=optimizer,
+        lr_scheduler=lr_scheduler,
+        wandb_log=args.wandb_log and accelerator.is_main_process,
+        autoenc=autoenc,
+        cnx=cnx,
+        mean=mean,
+        std=std,
+        blur_augs=blur_augs,
+        epoch_start=epoch_start,
+        losses=losses,
+        test_losses=test_losses,
+        lrs=lrs
+    )
 
 
 if __name__ == "__main__":

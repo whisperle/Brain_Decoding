@@ -242,6 +242,9 @@ class NAT_BrainNet(nn.Module):
             last_n_features=args.last_n_features,
             full_attention=args.full_attention,
             drop_rate=args.drop,
+            progressive_dims=args.progressive_dims,
+            initial_tokens=args.initial_tokens,
+            dim_scale_factor=args.dim_scale_factor
         )
         
         # # Linear layer to map brain_nat output to clip_emb_dim

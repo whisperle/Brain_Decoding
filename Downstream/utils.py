@@ -335,3 +335,105 @@ def save_ckpt(tag, args, model, optimizer, lr_scheduler, epoch, losses, test_los
             'lrs': lrs,
             }, ckpt_path)
     print(f"\n---saved {outdir}/{tag} ckpt!---\n")
+
+def load_ckpt(args, model, optimizer=None, lr_scheduler=None, accelerator=None, tag='last', strict=True):
+    """
+    Load checkpoint for model, optimizer, and training state.
+    If specified tag not found, will try to find latest iteration checkpoint.
+    
+    Args:
+        args: Training arguments
+        model: Model to load weights into
+        optimizer: Optional optimizer to load state
+        lr_scheduler: Optional learning rate scheduler to load state
+        accelerator: Accelerator instance for distributed training
+        tag: Checkpoint tag to load (default: 'last')
+        strict: Whether to strictly enforce that the keys in state_dict match
+        
+    Returns:
+        epoch: Last epoch number
+        losses: Training loss history
+        test_losses: Validation loss history 
+        lrs: Learning rate history
+        resumed: Whether checkpoint was successfully loaded
+    """
+    resumed = False
+    epoch = 0
+    losses = []
+    test_losses = []
+    lrs = []
+    
+    # Construct checkpoint path
+    ckpt_dir = os.path.abspath(f'../train_logs/{args.model_name}')
+    ckpt_path = os.path.join(ckpt_dir, f'{tag}.pth')
+    
+    # If specified checkpoint doesn't exist, try to find latest iteration checkpoint
+    if not os.path.exists(ckpt_path):
+        print(f"Checkpoint {ckpt_path} not found, searching for latest iteration checkpoint...")
+        if os.path.exists(ckpt_dir):
+            # Find all iteration checkpoints
+            iter_ckpts = [f for f in os.listdir(ckpt_dir) if f.startswith('iter_') and f.endswith('.pth')]
+            if iter_ckpts:
+                # Extract iteration numbers and find latest
+                iter_nums = [int(f.split('_')[1].split('.')[0]) for f in iter_ckpts]
+                latest_iter = max(iter_nums)
+                ckpt_path = os.path.join(ckpt_dir, f'iter_{latest_iter}.pth')
+                print(f"Found latest iteration checkpoint: {ckpt_path}")
+            else:
+                print("No iteration checkpoints found")
+                return epoch, losses, test_losses, lrs, resumed
+    
+    if os.path.exists(ckpt_path):
+        try:
+            print(f"Loading checkpoint from {ckpt_path}")
+            # Load checkpoint on CPU to avoid GPU RAM spike
+            ckpt = torch.load(ckpt_path, map_location='cpu')
+            
+            # Load model state
+            if accelerator is not None:
+                unwrapped_model = accelerator.unwrap_model(model)
+                unwrapped_model.load_state_dict(ckpt['model_state_dict'], strict=strict)
+            else:
+                model.load_state_dict(ckpt['model_state_dict'], strict=strict)
+            
+            # Load optimizer state if provided
+            if optimizer is not None and 'optimizer_state_dict' in ckpt:
+                optimizer.load_state_dict(ckpt['optimizer_state_dict'])
+            
+            # Load scheduler state if provided
+            if lr_scheduler is not None and 'lr_scheduler' in ckpt:
+                lr_scheduler.load_state_dict(ckpt['lr_scheduler'])
+            
+            # Load training state
+            epoch = ckpt.get('epoch', 0)
+            losses = ckpt.get('train_losses', [])
+            test_losses = ckpt.get('test_losses', [])
+            lrs = ckpt.get('lrs', [])
+            
+            print(f"Successfully loaded checkpoint from epoch {epoch}")
+            resumed = True
+            
+            # Handle wandb logging resume
+            if args.wandb_log and accelerator is not None and accelerator.is_main_process:
+                import wandb
+                if wandb.run is not None:
+                    # Log metrics from previous training
+                    for i, (loss, test_loss, lr) in enumerate(zip(losses, test_losses, lrs)):
+                        wandb.log({
+                            "train/loss": loss,
+                            "test/loss": test_loss,
+                            "train/lr": lr,
+                            "train/epoch": i
+                        })
+            
+        except Exception as e:
+            print(f"Error loading checkpoint: {str(e)}")
+            # Initialize fresh training state
+            epoch = 0
+            losses = []
+            test_losses = []
+            lrs = []
+    else:
+        print(f"No checkpoint found at {ckpt_path}, starting from scratch")
+    
+    return epoch, losses, test_losses, lrs, resumed

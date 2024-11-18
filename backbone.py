@@ -93,46 +93,116 @@ class BrainNATLayer(nn.Module):
 class BrainNATBlock(nn.Module):
     def __init__(self, dim, depth, num_heads, num_neighbors, mlp_ratio=4., qkv_bias=True, drop=0.,
                  attn_drop=0., drop_path=0., norm_layer=nn.LayerNorm, tome_r=0, layer_scale_init_value=1e-6,
-                 last_n_features=16, full_attention=False):
+                 last_n_features=16, full_attention=False, progressive_dims=False, dims=None):
         super().__init__()
-        self.blocks = nn.ModuleList([
-            BrainNATLayer(
-                dim=dim, num_heads=num_heads, num_neighbors=num_neighbors,
-                mlp_ratio=mlp_ratio, qkv_bias=qkv_bias, drop=drop, attn_drop=attn_drop,
+        # Create layers with progressive dimensions
+        self.nat_layers = nn.ModuleList()
+        self.dim_layers = nn.ModuleList()
+        
+        for i in range(depth):
+            current_dim = dims[i] if progressive_dims else dim
+            next_dim = dims[i+1] if progressive_dims and i < depth-1 else dims[-1]  # Always use final dim for last layer
+            
+            # Create NAT layer
+            layer = BrainNATLayer(
+                dim=current_dim,
+                num_heads=num_heads,
+                num_neighbors=num_neighbors,
+                mlp_ratio=mlp_ratio,
+                qkv_bias=qkv_bias,
+                drop=drop,
+                attn_drop=attn_drop,
                 drop_path=drop_path[i] if isinstance(drop_path, list) else drop_path,
-                norm_layer=norm_layer, tome_r=tome_r, layer_scale_init_value=layer_scale_init_value,
-                use_coords=(i == 0), last_n_features=last_n_features, full_attention=full_attention)
-            for i in range(depth)])
+                norm_layer=norm_layer,
+                tome_r=tome_r,
+                layer_scale_init_value=layer_scale_init_value,
+                use_coords=(i == 0),
+                last_n_features=last_n_features,
+                full_attention=full_attention
+            )
+            self.nat_layers.append(layer)
+            
+            # Add dimension scaling layer if dimensions change
+            if current_dim != next_dim:
+                self.dim_layers.append(nn.Linear(current_dim, next_dim))
+            else:
+                self.dim_layers.append(None)
+        
+        self.final_dim = dims[-1] if progressive_dims else dim
 
     def forward(self, x, coords):
-        for blk in self.blocks:
-            x = blk(x, coords)
+        for i, (nat_layer, dim_layer) in enumerate(zip(self.nat_layers, self.dim_layers)):
+            # Apply NAT layer
+            x = nat_layer(x, coords)
+            
+            # Apply dimension scaling if present
+            if dim_layer is not None:
+                x = dim_layer(x)
         return x
 
 class BrainNAT(nn.Module):
     def __init__(self, in_chans=1, embed_dim=96, depth=4, num_heads=8, num_neighbors=5,
                  mlp_ratio=4., qkv_bias=True, drop_rate=0., attn_drop_rate=0., drop_path_rate=0.2,
                  norm_layer=nn.LayerNorm, tome_r=0, layer_scale_init_value=1e-6, coord_dim=3, 
-                 omega_0=30, last_n_features=16,full_attention=False):
+                 omega_0=30, last_n_features=16, full_attention=False, progressive_dims=False,
+                 initial_tokens=15000, dim_scale_factor=1.0):
         super().__init__()
+        # Base embedding dimension
         self.embed_dim = 2 ** int(torch.log2(torch.tensor(embed_dim)).ceil().item())
         self.pos_embed_dim = embed_dim
-        self.total_embed_dim = self.embed_dim 
-        self.num_features = self.embed_dim
-        self.embed_layer = ConvTokenizer1D(in_chans=in_chans, embed_dim=self.embed_dim, norm_layer=norm_layer)
-        self.pos_drop = nn.Dropout(p=drop_rate)
         
+        # Calculate progressive dimensions if enabled
+        if progressive_dims:
+            # Calculate token reduction per layer
+            tokens_per_layer = [initial_tokens - tome_r*i for i in range(depth)]
+            
+            # Scale dimensions based on token reduction
+            base_dim = self.embed_dim
+            dims = []
+            for i in range(depth):
+                # Calculate scaled dimension
+                scale_factor = (initial_tokens / tokens_per_layer[i]) ** dim_scale_factor
+                scaled_dim = int(base_dim * scale_factor)
+                # Ensure dimension is divisible by num_heads
+                scaled_dim = (scaled_dim // num_heads) * num_heads
+                dims.append(scaled_dim)
+            
+            self.total_embed_dim = dims[0]  # Initial dimension
+            print(f"Progressive dimensions: {dims}")  # For debugging
+        else:
+            self.total_embed_dim = self.embed_dim
+            dims = [self.embed_dim] * depth
+        
+        # Initial layers
+        self.embed_layer = ConvTokenizer1D(in_chans=in_chans, embed_dim=self.total_embed_dim, norm_layer=norm_layer)
+        self.pos_drop = nn.Dropout(p=drop_rate)
         self.pos_embed = SirenPositionalEmbedding(in_features=coord_dim, out_features=self.pos_embed_dim, omega_0=omega_0)
         
+        # Create blocks with progressive dimensions
         dpr = [x.item() for x in torch.linspace(0, drop_path_rate, depth)]
         self.blocks = BrainNATBlock(
             dim=self.total_embed_dim,
-            depth=depth, num_heads=num_heads, num_neighbors=num_neighbors,
-            mlp_ratio=mlp_ratio, qkv_bias=qkv_bias, drop=drop_rate,
-            attn_drop=attn_drop_rate, drop_path=dpr, norm_layer=norm_layer, tome_r=tome_r,
-            layer_scale_init_value=layer_scale_init_value, last_n_features=last_n_features, full_attention=full_attention)
-        self.norm = norm_layer(self.total_embed_dim)
-        self.head = nn.Linear(self.total_embed_dim, self.embed_dim)
+            depth=depth,
+            num_heads=num_heads,
+            num_neighbors=num_neighbors,
+            mlp_ratio=mlp_ratio,
+            qkv_bias=qkv_bias,
+            drop=drop_rate,
+            attn_drop=attn_drop_rate,
+            drop_path=dpr,
+            norm_layer=norm_layer,
+            tome_r=tome_r,
+            layer_scale_init_value=layer_scale_init_value,
+            last_n_features=last_n_features,
+            full_attention=full_attention,
+            progressive_dims=progressive_dims,
+            dims=dims
+        )
+        
+        # Final layers use the final dimension
+        self.norm = norm_layer(dims[-1])  # Use the final dimension from dims
+        self.head = nn.Linear(dims[-1], self.embed_dim)
+        
         self.apply(self._init_weights)
 
     def _init_weights(self, m):
@@ -232,7 +302,10 @@ if __name__ == "__main__":
         coord_dim=coord_dim,
         omega_0=30,
         last_n_features=16, # Use the last 16 features for neighborhood attention
-        full_attention=True
+        full_attention=True,
+        progressive_dims=True,
+        initial_tokens=15000,
+        dim_scale_factor=6
     ).to(device)
     batch_size = 32
     coords_1 = torch.tensor(coords_1, dtype=torch.float32, device=device).unsqueeze(0)
