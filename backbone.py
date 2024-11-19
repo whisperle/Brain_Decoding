@@ -199,9 +199,6 @@ class BrainNAT(nn.Module):
             dims=dims
         )
         
-        # Final layers use the final dimension
-        self.norm = norm_layer(dims[-1])  # Use the final dimension from dims
-        self.head = nn.Linear(dims[-1], self.embed_dim)
         
         self.apply(self._init_weights)
 
@@ -226,12 +223,10 @@ class BrainNAT(nn.Module):
         x = x + pos_embeds
         
         x = self.blocks(x, coords)
-        x = self.norm(x)
         return x
 
     def forward(self, x, coords, jepa_mask=False, num_masks=None, mask_size=None, mask_token=None):
         x = self.forward_features(x, coords, jepa_mask, num_masks, mask_size, mask_token)
-        x = self.head(x)
         return x
 
     def apply_jepa_mask(self, x, num_masks, mask_size, mask_token):

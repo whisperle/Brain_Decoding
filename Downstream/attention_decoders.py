@@ -247,8 +247,8 @@ class NAT_BrainNet(nn.Module):
             dim_scale_factor=args.dim_scale_factor
         )
         
-        # # Linear layer to map brain_nat output to clip_emb_dim
-        self.feature_mapper = nn.Linear(args.encoder_hidden_dim, args.decoder_hidden_dim)
+        # Linear layer to map brain_nat output to clip_emb_dim
+        self.feature_mapper = nn.Linear(self.brain_nat.blocks.final_dim, args.decoder_hidden_dim)
 
         # Brain Network backbone
         self.backbone = SpatialAwareBrainNetwork(
