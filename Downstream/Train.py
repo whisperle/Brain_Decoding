@@ -270,12 +270,13 @@ def build_model(args, device, data_type):
     model = NAT_BrainNet(args, clip_emb_dim, clip_seq_dim).to(device)
     # model = torch.compile(model)
     print("model parameters:")
-    utils.count_params(model)
+    Model_param = utils.count_params(model)
     print("model.brain_nat")
-    utils.count_params(model.brain_nat)
+    Brain_nat_param = utils.count_params(model.brain_nat)
     print("model.backbone")
-    utils.count_params(model.backbone)
-    
+    Backbone_param = utils.count_params(model.backbone)
+    if args.wandb_log:
+        wandb.log({"Model_param": Model_param, "Brain_nat_param": Brain_nat_param, "Backbone_param": Backbone_param})
     return clip_img_embedder, model, autoenc, cnx, mean, std, blur_augs
 
 def setup_optimizer(args, model, num_iterations_per_epoch):

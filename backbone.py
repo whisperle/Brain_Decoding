@@ -148,7 +148,8 @@ class BrainNAT(nn.Module):
                  initial_tokens=15000, dim_scale_factor=1.0):
         super().__init__()
         # Base embedding dimension
-        self.embed_dim = 2 ** int(torch.log2(torch.tensor(embed_dim)).ceil().item())
+        # self.embed_dim = 2 ** int(torch.log2(torch.tensor(embed_dim)).ceil().item())
+        self.embed_dim = embed_dim
         self.pos_embed_dim = embed_dim
         
         # Calculate progressive dimensions if enabled
