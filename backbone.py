@@ -5,6 +5,8 @@ from timm.models.layers import DropPath
 from attention import NearestNeighborAttention
 from tome_customize import TokenMerging
 
+from IPython import embed
+
 class ConvTokenizer1D(nn.Module):
     # TODO: small change , elimate norm
     def __init__(self, in_chans=1, embed_dim=96, norm_layer=None):
@@ -212,13 +214,13 @@ class BrainNAT(nn.Module):
             nn.init.constant_(m.bias, 0)
             nn.init.constant_(m.weight, 1.0)
 
-    def forward_features(self, x, coords, jepa_mask=False, num_masks=None, mask_size=None, mask_token=None):
+    def forward_features(self, x, coords, jepa_mask=False, mask_indices=None, mask_token=None):
         x = self.embed_layer(x)  
 
         x = self.pos_drop(x)
 
         if jepa_mask:
-            x = self.apply_jepa_mask(x, num_masks, mask_size, mask_token)
+            x = self.apply_jepa_mask(x, mask_indices, mask_token)
         
         pos_embeds = self.pos_embed(coords)
         x = x + pos_embeds
@@ -226,20 +228,13 @@ class BrainNAT(nn.Module):
         x = self.blocks(x, coords)
         return x
 
-    def forward(self, x, coords, jepa_mask=False, num_masks=None, mask_size=None, mask_token=None):
-        x = self.forward_features(x, coords, jepa_mask, num_masks, mask_size, mask_token)
+    def forward(self, x, coords, jepa_mask=False, mask_indices=None, mask_token=None):
+        x = self.forward_features(x, coords, jepa_mask, mask_indices, mask_token)
         return x
 
-    def apply_jepa_mask(self, x, num_masks, mask_size, mask_token):
-        batch_size, sequence_length, embed_size = x.shape
-    
-        for _ in range(num_masks):
-            start_indices = torch.randint(0, sequence_length - mask_size + 1, (batch_size,))
-            
-            for i, start_idx in enumerate(start_indices):
-                end_idx = min(start_idx + mask_size, sequence_length)
-                x[i, start_idx:end_idx, :] = mask_token
-        
+    def apply_jepa_mask(self, x, mask_indices, mask_token):
+        for b in range(x.size(0)):
+            x[b, mask_indices[b]] = mask_token
         return x
 
 

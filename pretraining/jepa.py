@@ -12,7 +12,8 @@ import os
 
 from backbone import BrainNAT
 
-from dataset import MindEye2Dataset, SubjectBatchSampler, custom_collate_fn
+from dataset import MindEye2Dataset, SubjectBatchSampler
+from mask import MaskCollator
 
 from IPython import embed
 
@@ -24,7 +25,7 @@ def parse_arguments():
     )
     parser.add_argument(
         "--multi_subject",type=lambda x: [int(i) for i in x.split(',')],
-        default="1",
+        default="2,3,4,5,6,7,8",
         help="List of subjects to use for multi-subject training",
     )
     parser.add_argument(
@@ -40,7 +41,7 @@ def parse_arguments():
         help="Path to where miscellaneous files downloaded from huggingface are stored. Defaults to current directory.",
     )
     parser.add_argument(
-        "--batch_size", type=int, default=32,
+        "--batch_size", type=int, default=128,
         help="Batch size can be increased by 10x if only training retrieval submodule and not diffusion prior",
     )
     parser.add_argument(
@@ -60,7 +61,7 @@ def parse_arguments():
         help="Number of blocks in the model",
     )
     parser.add_argument(
-        "--hidden_dim", type=int, default=1024, #todo Try 512
+        "--hidden_dim", type=int, default=256, #todo Try 512
         help="Hidden dimension size",
     )
     parser.add_argument(
@@ -75,19 +76,22 @@ def parse_arguments():
         "--ckpt_path", type=str, default="/scratch/cc6946/projects/Brain_Decoding/pretraining/ckpt"
     )
     parser.add_argument(
-        "--num_heads", type=int, default=4,
+        "--num_heads", type=int, default=8,
         help="Number of attention heads in BrainNAT",
     )
     parser.add_argument(
-        "--tome_r", type=int, default=2000,
+        "--tome_r", type=int, default=1000,
         help="Token merging ratio for BrainNAT",
+    )
+    parser.add_argument(
+        "--drop_rate", type=float, default=0.1
     )
     parser.add_argument(
         "--last_n_features", type=int, default=16,
         help="Number of features in the last layer of BrainNAT",
     )
     parser.add_argument(
-        "--nat_depth", type=int, default=2,
+        "--nat_depth", type=int, default=6,
         help="Depth of the BrainNAT model",
     )
     parser.add_argument(
@@ -106,10 +110,10 @@ def parse_arguments():
         "--ipe_scale", type=float, default=1.0
     )
     parser.add_argument(
-        "--num_masks", type=int, default=50
+        "--num_masks", type=int, default=8
     )
     parser.add_argument(
-        "--mask_size", type=int, default=100
+        "--mask_ratio", type=float, default=0.8
     )  
     args = parser.parse_args()
     return args
@@ -132,6 +136,7 @@ encoder = BrainNAT(
     depth=args.nat_depth,
     num_heads=args.num_heads,
     num_neighbors=args.nat_num_neighbors,
+    drop_rate=args.drop_rate,
     tome_r=args.tome_r,
     layer_scale_init_value=1e-6,
     coord_dim=3,
@@ -146,12 +151,13 @@ for p in target_encoder.parameters():
 # mask token
 embed_dim = 2 ** int(torch.log2(torch.tensor(hidden_dim_nat)).ceil().item())
 mask_token = nn.Parameter(torch.randn(1, embed_dim, device=device))
-embed()
+
 # create dataloader
 data_type = torch.float16
 train_data = MindEye2Dataset(args, data_type, 'train')
 train_sampler = SubjectBatchSampler(train_data, args.batch_size)
-train_dl = torch.utils.data.DataLoader(train_data, batch_sampler=train_sampler, collate_fn=custom_collate_fn, num_workers=4, pin_memory=True)
+mask_collator = MaskCollator(args.mask_ratio, args.num_masks)
+train_dl = torch.utils.data.DataLoader(train_data, batch_sampler=train_sampler, collate_fn=mask_collator, num_workers=4, pin_memory=True)
 
 num_iterations_per_epoch = len(train_data) // args.batch_size
 
@@ -192,6 +198,7 @@ momentum_scheduler = (args.ema[0] + i*(args.ema[1]-args.ema[0])/(num_iterations_
 
 ####################################### Saving Checkpoint #######################################
 def save_checkpoint(epoch, path):
+    os.makedirs(path, exist_ok=True)
     save_dict = {
         'encoder': encoder.state_dict(),
         'opt': optimizer.state_dict(),
@@ -216,13 +223,14 @@ if args.wandb_log:
 for epoch in range(args.num_epochs):
     running_loss = 0.0 
 
-    for iteration, (images, voxels, subj_idx, coords, image_idx) in enumerate(train_dl):
+    for iteration, (images, voxels, subj_idx, coords, image_idx, mask_indices) in enumerate(train_dl):
         voxels = voxels.to(device)
         coords = coords.to(device)
+        mask_indices = mask_indices.to(device)
 
         optimizer.zero_grad()
         with torch.amp.autocast(device_type='cuda'):
-            z = encoder(voxels, coords, True, args.num_masks, args.mask_size, mask_token)
+            z = encoder(voxels, coords, True, mask_indices, mask_token)
             h = target_encoder(voxels, coords)
 
             criterion = nn.MSELoss()
@@ -250,5 +258,4 @@ for epoch in range(args.num_epochs):
 
     if args.ckpt_saving and (epoch % args.ckpt_interval == 0 or epoch == (args.num_epochs - 1)):
         ckpt_path = os.path.join(args.ckpt_path, args.model_name)
-        os.makedirs(ckpt_path, exist_ok=True)
         save_checkpoint(epoch + 1, ckpt_path)
