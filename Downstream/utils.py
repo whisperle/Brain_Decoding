@@ -121,29 +121,38 @@ def gather_features(image_features, voxel_features, accelerator):
         return all_image_features, all_voxel_features
     return all_image_features
 
-def soft_clip_loss(preds, targs, accelerator=None, temp=0.125):
-    clip_clip = (targs @ targs.T)/temp
-    brain_clip = (preds @ targs.T)/temp
-    loss1 = -(brain_clip.log_softmax(-1) * clip_clip.softmax(-1)).sum(-1).mean()
-    loss2 = -(brain_clip.T.log_softmax(-1) * clip_clip.softmax(-1)).sum(-1).mean()
-    
-    loss = (loss1 + loss2)/2
-    return loss
-
-# def soft_clip_loss(preds, targs, accelerator=None, temp=0.125):
-#     # Gather tensors across all GPUs if using distributed training
-#     if accelerator is not None:
-#         preds = accelerator.gather(preds)
-#         targs = accelerator.gather(targs)
-    
-#     clip_clip = (targs @ targs.T) / temp
-#     brain_clip = (preds @ targs.T) / temp
-    
+# def soft_clip_loss(preds, targs, temp=0.125):
+#     clip_clip = (targs @ targs.T)/temp
+#     brain_clip = (preds @ targs.T)/temp
 #     loss1 = -(brain_clip.log_softmax(-1) * clip_clip.softmax(-1)).sum(-1).mean()
 #     loss2 = -(brain_clip.T.log_softmax(-1) * clip_clip.softmax(-1)).sum(-1).mean()
     
-#     loss = (loss1 + loss2) / 2
+#     loss = (loss1 + loss2)/2
 #     return loss
+
+def soft_clip_loss(preds, targs, accelerator=None, temp=0.125):
+    # Gather tensors across all GPUs if using distributed training
+    if accelerator is not None:
+        preds = accelerator.gather(preds)
+        targs = accelerator.gather(targs)
+    
+    clip_clip = (targs @ targs.T) / temp
+    brain_clip = (preds @ targs.T) / temp
+    
+    loss1 = -(brain_clip.log_softmax(-1) * clip_clip.softmax(-1)).sum(-1).mean()
+    loss2 = -(brain_clip.T.log_softmax(-1) * clip_clip.softmax(-1)).sum(-1).mean()
+    
+    # Compute the global loss
+    loss = (loss1 + loss2) / 2
+    
+    # Scale the loss to avoid over-counting gradients.
+    # By default, each GPU now sees the entire global batch and calls backward.
+    # To correct for this, divide by the number of processes.
+    if accelerator is not None:
+        world_size = accelerator.num_processes
+        loss = loss / world_size
+    
+    return loss
 
 def soft_siglip_loss(preds, targs, temp, bias):
     temp = torch.exp(temp)

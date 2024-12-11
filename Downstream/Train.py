@@ -36,6 +36,7 @@ import utils
 from utils import save_ckpt
 from dataset import MindEye2Dataset, SubjectBatchSampler, custom_collate_fn
 import re
+from models import PriorNetwork, BrainDiffusionPrior
 
 def parse_arguments():
     parser = argparse.ArgumentParser(description="Model Training Configuration")
@@ -269,6 +270,37 @@ def build_model(args, device, data_type):
         blur_augs = None
 
     model = NAT_BrainNet(args, clip_emb_dim, clip_seq_dim).to(device)
+
+    # Optional Prior Network
+    if args.use_prior:
+        out_dim = clip_emb_dim
+        depth = 6
+        dim_head = 52
+        heads = clip_emb_dim // 52
+        timesteps = 100
+        
+        prior_network = PriorNetwork(
+            dim=out_dim,
+            depth=depth,
+            dim_head=dim_head,
+            heads=heads,
+            causal=False,
+            num_tokens=clip_seq_dim,
+            learned_query_mode="pos_emb"
+        )
+        
+        diffusion_prior = BrainDiffusionPrior(
+            net=prior_network,
+            image_embed_dim=out_dim,
+            condition_on_text_encodings=False,
+            timesteps=timesteps,
+            cond_drop_prob=0.2,
+            image_embed_scale=None,
+        )
+    else:
+        diffusion_prior = None
+    
+
     # model = torch.compile(model)
     print("model parameters:")
     Model_param = utils.count_params(model)
@@ -277,9 +309,19 @@ def build_model(args, device, data_type):
     print("model.backbone")
     Backbone_param = utils.count_params(model.backbone)
     param_count_dict = {"Model_param": Model_param, "Brain_nat_param": Brain_nat_param, "Backbone_param": Backbone_param}
-    return clip_img_embedder, model, autoenc, cnx, mean, std, blur_augs, param_count_dict
+    return (
+        clip_img_embedder,
+        model,
+        diffusion_prior,
+        autoenc,
+        cnx,
+        mean,
+        std,
+        blur_augs,
+        param_count_dict
+    )
 
-def setup_optimizer(args, model, num_iterations_per_epoch):
+def setup_optimizer(args, model, diffusion_prior, num_iterations_per_epoch):
     no_decay = ['bias', 'LayerNorm.bias', 'LayerNorm.weight']
     max_lr = args.max_lr
 
@@ -343,9 +385,9 @@ def setup_optimizer(args, model, num_iterations_per_epoch):
     # Add prior network parameters if enabled
     if args.use_prior:
         opt_grouped_parameters.extend([
-            {'params': [p for n, p in model.diffusion_prior.named_parameters() if not any(nd in n for nd in no_decay)],
+            {'params': [p for n, p in diffusion_prior.named_parameters() if not any(nd in n for nd in no_decay)],
              'weight_decay': 1e-2},
-            {'params': [p for n, p in model.diffusion_prior.named_parameters() if any(nd in n for nd in no_decay)],
+            {'params': [p for n, p in diffusion_prior.named_parameters() if any(nd in n for nd in no_decay)],
              'weight_decay': 0.0}
         ])
 
@@ -390,7 +432,7 @@ def setup_wandb(args,train_url="", test_url=""):
     return wandb_log
 
 
-def train(args, model, train_dl, test_dl, accelerator, data_type, num_iterations_per_epoch,
+def train(args, model, diffusion_prior, train_dl, test_dl, accelerator, data_type, num_iterations_per_epoch,
           num_test, subj_list, clip_img_embedder, optimizer, lr_scheduler, wandb_log, autoenc, cnx, mean, std,
           blur_augs, epoch_start=0, losses=None, test_losses=None, lrs=None):
     
@@ -484,10 +526,7 @@ def train(args, model, train_dl, test_dl, accelerator, data_type, num_iterations
                     clip_target_norm = nn.functional.normalize(clip_target.flatten(1), dim=-1)
 
                 if use_prior:
-                    if accelerator.num_processes > 1:
-                        loss_prior, prior_out = accelerator.unwrap_model(model).diffusion_prior(text_embed=backbone, image_embed=clip_target)
-                    else:
-                        loss_prior, prior_out = model.diffusion_prior(text_embed=backbone, image_embed=clip_target)
+                    loss_prior, prior_out = diffusion_prior(text_embed=backbone, image_embed=clip_target)
 
                     loss_prior_total += loss_prior.item()
                     loss_prior *= prior_scale
@@ -643,10 +682,7 @@ def train(args, model, train_dl, test_dl, accelerator, data_type, num_iterations
                     random_samps = np.random.choice(np.arange(len(image)), size=len(image)//5, replace=False)
                     
                     if use_prior:
-                        if accelerator.num_processes > 1:
-                            loss_prior, prior_out = accelerator.unwrap_model(model).diffusion_prior(text_embed=backbone[random_samps], image_embed=clip_target[random_samps])
-                        else:
-                            loss_prior, prior_out = model.diffusion_prior(text_embed=backbone[random_samps], image_embed=clip_target[random_samps])
+                        diffusion_prior(text_embed=backbone[random_samps], image_embed=clip_target[random_samps])
                         test_loss_prior_total += loss_prior.item()
                         loss_prior *= prior_scale
                         loss += loss_prior
@@ -802,10 +838,10 @@ def main():
     train_dl, test_dl, num_test, num_iterations_per_epoch = prepare_data(args, data_type)
 
     # Model initialization
-    clip_img_embedder, model, autoenc, cnx, mean, std, blur_augs, param_count_dict = build_model(args, device, data_type)
+    clip_img_embedder, model, diffusion_prior, autoenc, cnx, mean, std, blur_augs, param_count_dict = build_model(args, device, data_type)
     if args.wandb_log and accelerator.is_main_process:
         wandb.log(param_count_dict)
-    optimizer, lr_scheduler = setup_optimizer(args, model, num_iterations_per_epoch)
+    optimizer, lr_scheduler = setup_optimizer(args, model, diffusion_prior, num_iterations_per_epoch)
 
     # Load checkpoint if exists
     epoch_start, losses, test_losses, lrs, resumed = utils.load_ckpt(
@@ -818,8 +854,8 @@ def main():
     )
 
     # Prepare for distributed training
-    model, optimizer, train_dl, lr_scheduler = accelerator.prepare(
-        model, optimizer, train_dl, lr_scheduler
+    model, diffusion_prior, optimizer, train_dl, lr_scheduler = accelerator.prepare(
+        model, diffusion_prior, optimizer, train_dl, lr_scheduler
     )
 
     # Print training status
@@ -833,6 +869,7 @@ def main():
     train(
         args=args,
         model=model,
+        diffusion_prior=diffusion_prior,
         train_dl=train_dl,
         test_dl=test_dl,
         accelerator=accelerator,
