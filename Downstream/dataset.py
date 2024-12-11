@@ -82,6 +82,8 @@ def load_web_dataset(args, split):
     if args.multi_subject:
         subj_list = args.multi_subject
         nsessions_allsubj = np.array([40, 40, 32, 30, 40, 32, 40, 30])
+        if args.num_sessions<40:
+            nsessions_allsubj =  np.array([args.num_sessions]*8)
     else:
         subj_list = [args.subj]
 
