@@ -730,38 +730,51 @@ def train(args, model, diffusion_prior, train_dl, test_dl, accelerator, data_typ
                 if wandb_log:
                     wandb.log({
                         "test/loss_per_iter": loss.item(),
-                        "test/blurry_pixcorr_per_iter": test_blurry_pixcorr / len(image),
-                        "test/recon_cossim_per_iter": test_recon_cossim / len(image),
-                        "test/recon_mse_per_iter": test_recon_mse / len(image),
-                        "test/loss_prior_per_iter": test_loss_prior_total / len(image),
-                        "test/loss_clip_per_iter": test_loss_clip_total / len(image),
+                        "test/blurry_pixcorr_per_iter": pixcorr.item() if blurry_recon else 0.0,
+                        "test/fwd_acc_per_iter": utils.topk(utils.batchwise_cosine_similarity(clip_voxels_norm, clip_target_norm), labels, k=1).item() if clip_scale > 0 else 0.0,
+                        "test/bwd_acc_per_iter": utils.topk(utils.batchwise_cosine_similarity(clip_target_norm, clip_voxels_norm), labels, k=1).item() if clip_scale > 0 else 0.0,
+                        "test/loss_clip_per_iter": loss_clip.item() if clip_scale > 0 else 0.0,
+                        "test/loss_prior_per_iter": loss_prior.item() if use_prior else 0.0,
+                        "global_step": iteration
                     })
 
             # assert (test_i+1) == 1
-            logs = {"train/loss": np.mean(losses[-(train_i+1):]),
-                "test/loss": np.mean(test_losses[-(test_i+1):]),
+            logs = {
+                "epoch": epoch,
+                "train/loss": np.mean(losses[-num_iterations_per_epoch:]),  # Only average losses from current epoch
+                "test/loss": np.mean(test_losses[-len(test_dl):]),  # Only average losses from current test run
                 "train/lr": lrs[-1],
-                "train/num_steps": len(losses),
-                "test/num_steps": len(test_losses),
-                "train/fwd_pct_correct": fwd_percent_correct / (train_i + 1),
-                "train/bwd_pct_correct": bwd_percent_correct / (train_i + 1),
-                "test/test_fwd_pct_correct": test_fwd_percent_correct / (test_i + 1),
-                "test/test_bwd_pct_correct": test_bwd_percent_correct / (test_i + 1),
-                "train/loss_clip_total": loss_clip_total / (train_i + 1),
-                "train/loss_blurry_total": loss_blurry_total / (train_i + 1),
-                "train/loss_blurry_cont_total": loss_blurry_cont_total / (train_i + 1),
-                "test/loss_clip_total": test_loss_clip_total / (test_i + 1),
-                "train/blurry_pixcorr": blurry_pixcorr / (train_i + 1),
-                "test/blurry_pixcorr": test_blurry_pixcorr / (test_i + 1),
-                "train/recon_cossim": recon_cossim / (train_i + 1),
-                "test/recon_cossim": test_recon_cossim / (test_i + 1),
-                "train/recon_mse": recon_mse / (train_i + 1),
-                "test/recon_mse": test_recon_mse / (test_i + 1),
-                "train/loss_prior": loss_prior_total / (train_i + 1),
-                "test/loss_prior": test_loss_prior_total / (test_i + 1),
-                }
+                "train/fwd_acc": fwd_percent_correct / (train_i + 1),
+                "train/bwd_acc": bwd_percent_correct / (train_i + 1),
+                "test/fwd_acc": test_fwd_percent_correct / (test_i + 1),
+                "test/bwd_acc": test_bwd_percent_correct / (test_i + 1),
+            }
 
-            # if finished training, save jpg recons if they exist
+            if clip_scale > 0:
+                logs.update({
+                    "train/loss_clip": loss_clip_total / (train_i + 1),
+                    "test/loss_clip": test_loss_clip_total / (test_i + 1),
+                })
+
+            if blurry_recon:
+                logs.update({
+                    "train/loss_blurry": loss_blurry_total / (train_i + 1),
+                    "train/loss_blurry_cont": loss_blurry_cont_total / (train_i + 1),
+                    "train/blurry_pixcorr": blurry_pixcorr / (train_i + 1),
+                    "test/blurry_pixcorr": test_blurry_pixcorr / (test_i + 1),
+                })
+
+            if use_prior:
+                logs.update({
+                    "train/loss_prior": loss_prior_total / (train_i + 1),
+                    "test/loss_prior": test_loss_prior_total / (test_i + 1),
+                    "train/recon_cossim": recon_cossim / (train_i + 1),
+                    "test/recon_cossim": test_recon_cossim / (test_i + 1),
+                    "train/recon_mse": recon_mse / (train_i + 1),
+                    "test/recon_mse": test_recon_mse / (test_i + 1),
+                })
+
+            # if finished training or checkpoint interval, save blurry reconstructions
             if (epoch == num_epochs-1) or (epoch % ckpt_interval == 0):
                 if blurry_recon:    
                     image_enc = autoenc.encode(2*image[:4]-1).latent_dist.mode() * 0.18215
@@ -777,12 +790,13 @@ def train(args, model, diffusion_prior, train_dl, test_dl, accelerator, data_typ
                         axes[jj].axis('off')
 
                     if wandb_log:
-                        logs[f"test/blur_recons"] = wandb.Image(fig, caption=f"epoch{epoch:03d}")
+                        logs["test/blur_recons"] = wandb.Image(fig, caption=f"epoch{epoch:03d}")
                         plt.close()
                     else:
                         plt.show()
 
-            if wandb_log: wandb.log(logs)
+            if wandb_log:
+                wandb.log(logs)
                 
         # Save model checkpoint and reconstruct
         if (ckpt_saving) and (epoch % ckpt_interval == 0):
