@@ -468,6 +468,7 @@ def train(args, model, diffusion_prior, train_dl, test_dl, accelerator, data_typ
         disable=not accelerator.is_local_main_process
     )
     
+    global_iteration = 0
     for epoch in epoch_progress:
         model.train()
         iteration = 0
@@ -494,7 +495,13 @@ def train(args, model, diffusion_prior, train_dl, test_dl, accelerator, data_typ
         
         iter_progress = tqdm(train_dl, desc=f'Epoch {epoch}', leave=False, disable=not accelerator.is_local_main_process)
         for train_i, (images, voxels, subj_idx, coords, image_idx) in enumerate(iter_progress):
-            
+            blurry_pixcorr_per_iter = 0
+            recon_cossim_per_iter = 0
+            recon_mse_per_iter = 0
+            loss_prior_per_iter = 0
+            loss_clip_per_iter = 0
+            loss_blurry_per_iter = 0
+            loss_blurry_cont_per_iter = 0
             with torch.amp.autocast('cuda'):
                 batch_size = voxels.shape[0]
                 if batch_size != args.batch_size:
@@ -528,12 +535,15 @@ def train(args, model, diffusion_prior, train_dl, test_dl, accelerator, data_typ
                 if use_prior:
                     loss_prior, prior_out = diffusion_prior(text_embed=backbone, image_embed=clip_target)
 
-                    loss_prior_total += loss_prior.item()
+                    loss_prior_per_iter = loss_prior.item()
+                    loss_prior_total += loss_prior_per_iter
                     loss_prior *= prior_scale
                     loss += loss_prior
 
-                    recon_cossim += nn.functional.cosine_similarity(prior_out, clip_target).mean().item()
-                    recon_mse += mse(prior_out, clip_target).item()
+                    recon_cossim_per_iter = nn.functional.cosine_similarity(prior_out, clip_target).mean().item()
+                    recon_cossim += recon_cossim_per_iter
+                    recon_mse_per_iter = mse(prior_out, clip_target).item()
+                    recon_mse += recon_mse_per_iter
 
                 if clip_scale>0:
                     if epoch < int(mixup_pct * num_epochs):                
@@ -550,7 +560,8 @@ def train(args, model, diffusion_prior, train_dl, test_dl, accelerator, data_typ
                             accelerator,
                             temp=epoch_temp)
 
-                    loss_clip_total += loss_clip.item()
+                    loss_clip_per_iter = loss_clip.item()
+                    loss_clip_total += loss_clip_per_iter
                     loss_clip *= clip_scale
                     loss += loss_clip
 
@@ -559,7 +570,8 @@ def train(args, model, diffusion_prior, train_dl, test_dl, accelerator, data_typ
 
                     image_enc = autoenc.encode(2*image-1).latent_dist.mode() * 0.18215
                     loss_blurry = l1(image_enc_pred, image_enc)
-                    loss_blurry_total += loss_blurry.item()
+                    loss_blurry_per_iter = loss_blurry.item()
+                    loss_blurry_total += loss_blurry_per_iter
 
                     if epoch < int(mixup_pct * num_epochs):
                         image_enc_shuf = image_enc[perm]
@@ -576,7 +588,8 @@ def train(args, model, diffusion_prior, train_dl, test_dl, accelerator, data_typ
                         nn.functional.normalize(cnx_embeds.reshape(-1, cnx_embeds.shape[-1]), dim=-1),
                         nn.functional.normalize(cnx_aug_embeds.reshape(-1, cnx_embeds.shape[-1]), dim=-1),
                         temp=0.2)
-                    loss_blurry_cont_total += cont_loss.item()
+                    loss_blurry_cont_per_iter = cont_loss.item()
+                    loss_blurry_cont_total += loss_blurry_cont_per_iter
 
                     loss += (loss_blurry + 0.1*cont_loss) * blur_scale #/.18215
                         
@@ -593,7 +606,8 @@ def train(args, model, diffusion_prior, train_dl, test_dl, accelerator, data_typ
                         random_samps = np.random.choice(np.arange(len(image)), size=samp_size, replace=False)
                         blurry_recon_images = (autoenc.decode(image_enc_pred[random_samps]/0.18215).sample/ 2 + 0.5).clamp(0,1)
                         pixcorr = utils.pixcorr(image[random_samps], blurry_recon_images)
-                        blurry_pixcorr += pixcorr.item()
+                        blurry_pixcorr_per_iter = pixcorr.item()
+                        blurry_pixcorr += blurry_pixcorr_per_iter
                 utils.check_loss(loss)
                 accelerator.backward(loss)
                 optimizer.step()
@@ -607,19 +621,20 @@ def train(args, model, diffusion_prior, train_dl, test_dl, accelerator, data_typ
                 if accelerator.is_main_process and wandb_log:
                     wandb.log({
                         "train/loss_per_iter": loss.item(),
-                        "train/blurry_pixcorr_per_iter": blurry_pixcorr / args.batch_size,
-                        "train/recon_cossim_per_iter": recon_cossim / args.batch_size,
-                        "train/recon_mse_per_iter": recon_mse / args.batch_size,
-                        "train/loss_prior_per_iter": loss_prior_total / args.batch_size,
-                        "train/loss_clip_per_iter": loss_clip_total / args.batch_size,
-                        "train/loss_blurry_per_iter": loss_blurry_total / args.batch_size,
-                        "train/loss_blurry_cont_per_iter": loss_blurry_cont_total / args.batch_size,
-                    })
+                        "train/blurry_pixcorr_per_iter": blurry_pixcorr_per_iter / args.batch_size,
+                        "train/recon_cossim_per_iter": recon_cossim_per_iter / args.batch_size,
+                        "train/recon_mse_per_iter": recon_mse_per_iter / args.batch_size,
+                        "train/loss_prior_per_iter": loss_prior_per_iter / args.batch_size,
+                        "train/loss_clip_per_iter": loss_clip_per_iter / args.batch_size,
+                        "train/loss_blurry_per_iter": loss_blurry_per_iter / args.batch_size,
+                        "train/loss_blurry_cont_per_iter": loss_blurry_cont_per_iter / args.batch_size,
+                    }, step=global_iteration)
 
                 iteration += 1
+                global_iteration += 1
                 if accelerator.is_main_process:
-                    if iteration % args.ckpt_iter == 0 and ckpt_saving:
-                        save_ckpt(f'iter_{iteration}', args, accelerator.unwrap_model(model), optimizer, lr_scheduler, epoch, losses, test_losses, lrs, accelerator, ckpt_saving=True)
+                    if global_iteration % args.ckpt_iter == 0 and ckpt_saving:
+                        save_ckpt(f'iter_{global_iteration}', args, accelerator.unwrap_model(model), optimizer, lr_scheduler, epoch, losses, test_losses, lrs, accelerator, ckpt_saving=True)
 
         model.eval()
         test_image, test_voxel, test_coords, test_lens = None, None, None, None
@@ -699,8 +714,8 @@ def train(args, model, diffusion_prior, train_dl, test_dl, accelerator, data_typ
                     loss_prior *= prior_scale
                     loss += loss_prior
                     # TODO: this two line was not tested
-                    recon_cossim += nn.functional.cosine_similarity(prior_out, clip_target).mean().item()
-                    recon_mse += mse(prior_out, clip_target).item()
+                    test_recon_cossim += nn.functional.cosine_similarity(prior_out, clip_target).mean().item()
+                    test_recon_mse += mse(prior_out, clip_target).item()
                 
                 if clip_scale>0:
                     loss_clip = utils.soft_clip_loss(
@@ -727,51 +742,41 @@ def train(args, model, diffusion_prior, train_dl, test_dl, accelerator, data_typ
                 
                 utils.check_loss(loss)                
                 test_losses.append(loss.item())
-                if wandb_log:
-                    wandb.log({
-                        "test/loss_per_iter": loss.item(),
-                        "test/blurry_pixcorr_per_iter": pixcorr.item() if blurry_recon else 0.0,
-                        "test/fwd_acc_per_iter": utils.topk(utils.batchwise_cosine_similarity(clip_voxels_norm, clip_target_norm), labels, k=1).item() if clip_scale > 0 else 0.0,
-                        "test/bwd_acc_per_iter": utils.topk(utils.batchwise_cosine_similarity(clip_target_norm, clip_voxels_norm), labels, k=1).item() if clip_scale > 0 else 0.0,
-                        "test/loss_clip_per_iter": loss_clip.item() if clip_scale > 0 else 0.0,
-                        "test/loss_prior_per_iter": loss_prior.item() if use_prior else 0.0,
-                        "global_step": iteration
-                    })
 
             # assert (test_i+1) == 1
             logs = {
-                "epoch": epoch,
-                "train/loss": np.mean(losses[-num_iterations_per_epoch:]),  # Only average losses from current epoch
-                "test/loss": np.mean(test_losses[-len(test_dl):]),  # Only average losses from current test run
-                "train/lr": lrs[-1],
-                "train/fwd_acc": fwd_percent_correct / (train_i + 1),
-                "train/bwd_acc": bwd_percent_correct / (train_i + 1),
-                "test/fwd_acc": test_fwd_percent_correct / (test_i + 1),
-                "test/bwd_acc": test_bwd_percent_correct / (test_i + 1),
+                "epoch/epoch": epoch,
+                "epoch/train_loss": np.mean(losses[-num_iterations_per_epoch:]),  # Only average losses from current epoch
+                "epoch/test_loss": np.mean(test_losses[-len(test_dl):]),  # Only average losses from current test run
+                "epoch/lr": lrs[-1],
+                "epoch/train_fwd_acc": fwd_percent_correct / (train_i + 1),
+                "epoch/train_bwd_acc": bwd_percent_correct / (train_i + 1),
+                "epoch/test_fwd_acc": test_fwd_percent_correct / (test_i + 1),
+                "epoch/test_bwd_acc": test_bwd_percent_correct / (test_i + 1),
             }
 
             if clip_scale > 0:
                 logs.update({
-                    "train/loss_clip": loss_clip_total / (train_i + 1),
-                    "test/loss_clip": test_loss_clip_total / (test_i + 1),
+                    "epoch/train_loss_clip": loss_clip_total / (train_i + 1),
+                    "epoch/test_loss_clip": test_loss_clip_total / (test_i + 1),
                 })
 
             if blurry_recon:
                 logs.update({
-                    "train/loss_blurry": loss_blurry_total / (train_i + 1),
-                    "train/loss_blurry_cont": loss_blurry_cont_total / (train_i + 1),
-                    "train/blurry_pixcorr": blurry_pixcorr / (train_i + 1),
-                    "test/blurry_pixcorr": test_blurry_pixcorr / (test_i + 1),
+                    "epoch/train_loss_blurry": loss_blurry_total / (train_i + 1),
+                    "epoch/train_loss_blurry_cont": loss_blurry_cont_total / (train_i + 1),
+                    "epoch/train_blurry_pixcorr": blurry_pixcorr / (train_i + 1),
+                    "epoch/test_blurry_pixcorr": test_blurry_pixcorr / (test_i + 1),
                 })
 
             if use_prior:
                 logs.update({
-                    "train/loss_prior": loss_prior_total / (train_i + 1),
-                    "test/loss_prior": test_loss_prior_total / (test_i + 1),
-                    "train/recon_cossim": recon_cossim / (train_i + 1),
-                    "test/recon_cossim": test_recon_cossim / (test_i + 1),
-                    "train/recon_mse": recon_mse / (train_i + 1),
-                    "test/recon_mse": test_recon_mse / (test_i + 1),
+                    "epoch/train_loss_prior": loss_prior_total / (train_i + 1),
+                    "epoch/test_loss_prior": test_loss_prior_total / (test_i + 1),
+                    "epoch/train_recon_cossim": recon_cossim / (train_i + 1),
+                    "epoch/test_recon_cossim": test_recon_cossim / (test_i + 1),
+                    "epoch/train_recon_mse": recon_mse / (train_i + 1),
+                    "epoch/test_recon_mse": test_recon_mse / (test_i + 1),
                 })
 
             # if finished training or checkpoint interval, save blurry reconstructions
@@ -796,7 +801,7 @@ def train(args, model, diffusion_prior, train_dl, test_dl, accelerator, data_typ
                         plt.show()
 
             if wandb_log:
-                wandb.log(logs)
+                wandb.log(logs, step=global_iteration)
                 
         # Save model checkpoint and reconstruct
         if (ckpt_saving) and (epoch % ckpt_interval == 0):
