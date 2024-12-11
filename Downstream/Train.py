@@ -18,6 +18,7 @@ import torch
 import torch.nn as nn
 from torchvision import transforms
 from accelerate import Accelerator
+from accelerate.utils import DistributedDataParallelKwargs
 import kornia
 from kornia.augmentation.container import AugmentationSequential
 # from models import NAT_BrainNe
@@ -275,9 +276,8 @@ def build_model(args, device, data_type):
     Brain_nat_param = utils.count_params(model.brain_nat)
     print("model.backbone")
     Backbone_param = utils.count_params(model.backbone)
-    if args.wandb_log:
-        wandb.log({"Model_param": Model_param, "Brain_nat_param": Brain_nat_param, "Backbone_param": Backbone_param})
-    return clip_img_embedder, model, autoenc, cnx, mean, std, blur_augs
+    param_count_dict = {"Model_param": Model_param, "Brain_nat_param": Brain_nat_param, "Backbone_param": Backbone_param}
+    return clip_img_embedder, model, autoenc, cnx, mean, std, blur_augs, param_count_dict
 
 def setup_optimizer(args, model, num_iterations_per_epoch):
     no_decay = ['bias', 'LayerNorm.bias', 'LayerNorm.weight']
@@ -484,7 +484,11 @@ def train(args, model, train_dl, test_dl, accelerator, data_type, num_iterations
                     clip_target_norm = nn.functional.normalize(clip_target.flatten(1), dim=-1)
 
                 if use_prior:
-                    loss_prior, prior_out = model.diffusion_prior(text_embed=backbone, image_embed=clip_target)
+                    if accelerator.num_processes > 1:
+                        loss_prior, prior_out = accelerator.unwrap_model(model).diffusion_prior(text_embed=backbone, image_embed=clip_target)
+                    else:
+                        loss_prior, prior_out = model.diffusion_prior(text_embed=backbone, image_embed=clip_target)
+
                     loss_prior_total += loss_prior.item()
                     loss_prior *= prior_scale
                     loss += loss_prior
@@ -504,6 +508,7 @@ def train(args, model, train_dl, test_dl, accelerator, data_type, num_iterations
                         loss_clip = utils.soft_clip_loss(
                             clip_voxels_norm,
                             clip_target_norm,
+                            accelerator,
                             temp=epoch_temp)
 
                     loss_clip_total += loss_clip.item()
@@ -638,7 +643,10 @@ def train(args, model, train_dl, test_dl, accelerator, data_type, num_iterations
                     random_samps = np.random.choice(np.arange(len(image)), size=len(image)//5, replace=False)
                     
                     if use_prior:
-                        loss_prior, contaminated_prior_out = model.diffusion_prior(text_embed=backbone[random_samps], image_embed=clip_target[random_samps])
+                        if accelerator.num_processes > 1:
+                            loss_prior, prior_out = accelerator.unwrap_model(model).diffusion_prior(text_embed=backbone[random_samps], image_embed=clip_target[random_samps])
+                        else:
+                            loss_prior, prior_out = model.diffusion_prior(text_embed=backbone[random_samps], image_embed=clip_target[random_samps])
                         test_loss_prior_total += loss_prior.item()
                         loss_prior *= prior_scale
                         loss += loss_prior
@@ -650,6 +658,7 @@ def train(args, model, train_dl, test_dl, accelerator, data_type, num_iterations
                         loss_clip = utils.soft_clip_loss(
                             clip_voxels_norm,
                             clip_target_norm,
+                            accelerator,
                             temp=.006)
 
                         test_loss_clip_total += loss_clip.item()
@@ -743,11 +752,13 @@ def main():
     args = parse_arguments()
     
     # Initialize accelerator first
+    kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
     accelerator = Accelerator(
         device_placement=True, 
         split_batches=False, 
         mixed_precision="fp16",
-        dynamo_backend="no"
+        dynamo_backend="no",
+        kwargs_handlers=[kwargs]
     )
     
     # Set up wandb only on main process
@@ -791,7 +802,9 @@ def main():
     train_dl, test_dl, num_test, num_iterations_per_epoch = prepare_data(args, data_type)
 
     # Model initialization
-    clip_img_embedder, model, autoenc, cnx, mean, std, blur_augs = build_model(args, device, data_type)
+    clip_img_embedder, model, autoenc, cnx, mean, std, blur_augs, param_count_dict = build_model(args, device, data_type)
+    if args.wandb_log and accelerator.is_main_process:
+        wandb.log(param_count_dict)
     optimizer, lr_scheduler = setup_optimizer(args, model, num_iterations_per_epoch)
 
     # Load checkpoint if exists

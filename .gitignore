@@ -65,3 +65,6 @@ docs/_build/
 
 tmp/
 *.out
+
+slurm-logs/
+slurm-raw/
