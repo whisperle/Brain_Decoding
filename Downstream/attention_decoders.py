@@ -263,33 +263,33 @@ class NAT_BrainNet(nn.Module):
         )
         
         # Optional Prior Network
-        if args.use_prior:
-            out_dim = clip_emb_dim
-            depth = 6
-            dim_head = 52
-            heads = clip_emb_dim // 52
-            timesteps = 100
+        # if args.use_prior:
+        #     out_dim = clip_emb_dim
+        #     depth = 6
+        #     dim_head = 52
+        #     heads = clip_emb_dim // 52
+        #     timesteps = 100
             
-            prior_network = PriorNetwork(
-                dim=out_dim,
-                depth=depth,
-                dim_head=dim_head,
-                heads=heads,
-                causal=False,
-                num_tokens=clip_seq_dim,
-                learned_query_mode="pos_emb"
-            )
+        #     prior_network = PriorNetwork(
+        #         dim=out_dim,
+        #         depth=depth,
+        #         dim_head=dim_head,
+        #         heads=heads,
+        #         causal=False,
+        #         num_tokens=clip_seq_dim,
+        #         learned_query_mode="pos_emb"
+        #     )
             
-            self.diffusion_prior = BrainDiffusionPrior(
-                net=prior_network,
-                image_embed_dim=out_dim,
-                condition_on_text_encodings=False,
-                timesteps=timesteps,
-                cond_drop_prob=0.2,
-                image_embed_scale=None,
-            )
-        else:
-            self.diffusion_prior = None
+        #     self.diffusion_prior = BrainDiffusionPrior(
+        #         net=prior_network,
+        #         image_embed_dim=out_dim,
+        #         condition_on_text_encodings=False,
+        #         timesteps=timesteps,
+        #         cond_drop_prob=0.2,
+        #         image_embed_scale=None,
+        #     )
+        # else:
+        #     self.diffusion_prior = None
 
     def forward(self, x, coords):
         # NAT backbone processing

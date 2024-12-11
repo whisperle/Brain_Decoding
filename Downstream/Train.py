@@ -623,154 +623,166 @@ def train(args, model, diffusion_prior, train_dl, test_dl, accelerator, data_typ
 
         model.eval()
         test_image, test_voxel, test_coords, test_lens = None, None, None, None
-        if accelerator.is_main_process:
-            with torch.no_grad(), torch.amp.autocast('cuda'): 
-                for test_i, (images, voxels, subj_idx, coords, image_idx) in enumerate(test_dl):  
-                    images = images.to(device)
-                    voxels = voxels.to(device)
-                    coords = coords.to(device)
-                    image_idx = image_idx.to(device)
-                    # all test samples should be loaded per batch such that test_i should never exceed 0
-                    if len(images) != args.batch_size:
-                        print(f"Warning: Batch size mismatch. Expected {args.batch_size}, got {len(images)}")
-                        continue
+        
+        # if accelerator.is_main_process:
+        with torch.no_grad(), torch.amp.autocast('cuda'): 
+            # Add progress bar for test dataloader
+            test_progress = tqdm(test_dl, desc=f'Testing epoch {epoch}', leave=False, 
+                                disable=not accelerator.is_local_main_process)
+            for test_i, (images, voxels, subj_idx, coords, image_idx) in enumerate(test_progress):
+                images = images.to(device)
+                voxels = voxels.to(device)
+                coords = coords.to(device)
+                image_idx = image_idx.to(device)
+                # all test samples should be loaded per batch such that test_i should never exceed 0
+                if len(images) != args.batch_size:
+                    print(f"Warning: Batch size mismatch. Expected {args.batch_size}, got {len(images)}")
+                    continue
 
-                    ## Average same-image repeats ##
-                    if test_image is None:
-                        voxel = voxels
-                        image = image_idx
-                        unique_image, sort_indices = torch.unique(image, return_inverse=True)
-                        for im in unique_image:
-                            locs = torch.where(im == image_idx)[0]
-                            if len(locs)==1:
-                                locs = locs.repeat(3)
-                            elif len(locs)==2:
-                                locs = locs.repeat(2)[:3]
-                            assert len(locs)==3
-                            if test_image is None:
-                                test_image = torch.Tensor(images[locs,0][None])
-                                test_voxel = voxels[locs][None]
-                                test_coords = coords[locs][None]
-                            else:
-                                test_image = torch.vstack((test_image, torch.Tensor(images[locs,0][None])))
-                                test_voxel = torch.vstack((test_voxel, voxels[locs][None]))
-                                test_coords = torch.vstack((test_coords, coords[locs][None]))
-                    loss=0.
-                                
-                    test_indices = torch.arange(len(test_voxel))
-                    voxel = test_voxel[test_indices]
-                    coords = test_coords[test_indices]
-                    image = test_image[test_indices]
+                # Update progress bar description with current metrics
+                if test_i > 0:  # Only update if we have accumulated some metrics
+                    test_progress.set_postfix({
+                        'loss': f"{np.mean(test_losses[-(test_i+1):]):.4f}",
+                        'fwd_acc': f"{test_fwd_percent_correct/(test_i+1):.4f}",
+                        'bwd_acc': f"{test_bwd_percent_correct/(test_i+1):.4f}"
+                    })
 
-                    clip_target = clip_img_embedder(image)
-                    for rep in range(3):
-                        backbone0, clip_voxels0, blurry_image_enc_ = model(voxel[:,rep], coords[:,rep])
-                        if rep==0:
-                            clip_voxels = clip_voxels0
-                            backbone = backbone0
+                ## Average same-image repeats ##
+                if test_image is None:
+                    voxel = voxels
+                    image = image_idx
+                    unique_image, sort_indices = torch.unique(image, return_inverse=True)
+                    for im in unique_image:
+                        locs = torch.where(im == image_idx)[0]
+                        if len(locs)==1:
+                            locs = locs.repeat(3)
+                        elif len(locs)==2:
+                            locs = locs.repeat(2)[:3]
+                        assert len(locs)==3
+                        if test_image is None:
+                            test_image = torch.Tensor(images[locs,0][None])
+                            test_voxel = voxels[locs][None]
+                            test_coords = coords[locs][None]
                         else:
-                            clip_voxels += clip_voxels0
-                            backbone += backbone0
-                    clip_voxels /= 3
-                    backbone /= 3
+                            test_image = torch.vstack((test_image, torch.Tensor(images[locs,0][None])))
+                            test_voxel = torch.vstack((test_voxel, voxels[locs][None]))
+                            test_coords = torch.vstack((test_coords, coords[locs][None]))
+                loss=0.
+                            
+                test_indices = torch.arange(len(test_voxel))
+                voxel = test_voxel[test_indices]
+                coords = test_coords[test_indices]
+                image = test_image[test_indices]
 
-                    if clip_scale>0:
-                        clip_voxels_norm = nn.functional.normalize(clip_voxels.flatten(1), dim=-1)
-                        clip_target_norm = nn.functional.normalize(clip_target.flatten(1), dim=-1)
-                    
-                    # for some evals, only doing a subset of the samples per batch because of computational cost
-                    random_samps = np.random.choice(np.arange(len(image)), size=len(image)//5, replace=False)
-                    
-                    if use_prior:
-                        diffusion_prior(text_embed=backbone[random_samps], image_embed=clip_target[random_samps])
-                        test_loss_prior_total += loss_prior.item()
-                        loss_prior *= prior_scale
-                        loss += loss_prior
-                        # TODO: this two line was not tested
-                        recon_cossim += nn.functional.cosine_similarity(prior_out, clip_target).mean().item()
-                        recon_mse += mse(prior_out, clip_target).item()
-                    
-                    if clip_scale>0:
-                        loss_clip = utils.soft_clip_loss(
-                            clip_voxels_norm,
-                            clip_target_norm,
-                            accelerator,
-                            temp=.006)
+                clip_target = clip_img_embedder(image)
+                for rep in range(3):
+                    backbone0, clip_voxels0, blurry_image_enc_ = model(voxel[:,rep], coords[:,rep])
+                    if rep==0:
+                        clip_voxels = clip_voxels0
+                        backbone = backbone0
+                    else:
+                        clip_voxels += clip_voxels0
+                        backbone += backbone0
+                clip_voxels /= 3
+                backbone /= 3
 
-                        test_loss_clip_total += loss_clip.item()
-                        loss_clip = loss_clip * clip_scale
-                        loss += loss_clip
+                if clip_scale>0:
+                    clip_voxels_norm = nn.functional.normalize(clip_voxels.flatten(1), dim=-1)
+                    clip_target_norm = nn.functional.normalize(clip_target.flatten(1), dim=-1)
+                
+                # for some evals, only doing a subset of the samples per batch because of computational cost
+                random_samps = np.random.choice(np.arange(len(image)), size=len(image)//5, replace=False)
+                
+                if use_prior:
+                    diffusion_prior(text_embed=backbone[random_samps], image_embed=clip_target[random_samps])
+                    test_loss_prior_total += loss_prior.item()
+                    loss_prior *= prior_scale
+                    loss += loss_prior
+                    # TODO: this two line was not tested
+                    recon_cossim += nn.functional.cosine_similarity(prior_out, clip_target).mean().item()
+                    recon_mse += mse(prior_out, clip_target).item()
+                
+                if clip_scale>0:
+                    loss_clip = utils.soft_clip_loss(
+                        clip_voxels_norm,
+                        clip_target_norm,
+                        accelerator,
+                        temp=.006)
 
-                    if blurry_recon:
-                        image_enc_pred, _ = blurry_image_enc_
-                        blurry_recon_images = (autoenc.decode(image_enc_pred[random_samps]/0.18215).sample / 2 + 0.5).clamp(0,1)
-                        pixcorr = utils.pixcorr(image[random_samps], blurry_recon_images)
-                        test_blurry_pixcorr += pixcorr.item()
+                    test_loss_clip_total += loss_clip.item()
+                    loss_clip = loss_clip * clip_scale
+                    loss += loss_clip
 
-                    if clip_scale>0:
-                        # forward and backward top 1 accuracy        
-                        labels = torch.arange(len(clip_voxels_norm)).to(clip_voxels_norm.device) 
-                        test_fwd_percent_correct += utils.topk(utils.batchwise_cosine_similarity(clip_voxels_norm, clip_target_norm), labels, k=1).item()
-                        test_bwd_percent_correct += utils.topk(utils.batchwise_cosine_similarity(clip_target_norm, clip_voxels_norm), labels, k=1).item()
-                    
-                    utils.check_loss(loss)                
-                    test_losses.append(loss.item())
+                if blurry_recon:
+                    image_enc_pred, _ = blurry_image_enc_
+                    blurry_recon_images = (autoenc.decode(image_enc_pred[random_samps]/0.18215).sample / 2 + 0.5).clamp(0,1)
+                    pixcorr = utils.pixcorr(image[random_samps], blurry_recon_images)
+                    test_blurry_pixcorr += pixcorr.item()
+
+                if clip_scale>0:
+                    # forward and backward top 1 accuracy        
+                    labels = torch.arange(len(clip_voxels_norm)).to(clip_voxels_norm.device) 
+                    test_fwd_percent_correct += utils.topk(utils.batchwise_cosine_similarity(clip_voxels_norm, clip_target_norm), labels, k=1).item()
+                    test_bwd_percent_correct += utils.topk(utils.batchwise_cosine_similarity(clip_target_norm, clip_voxels_norm), labels, k=1).item()
+                
+                utils.check_loss(loss)                
+                test_losses.append(loss.item())
+                if wandb_log:
+                    wandb.log({
+                        "test/loss_per_iter": loss.item(),
+                        "test/blurry_pixcorr_per_iter": test_blurry_pixcorr / len(image),
+                        "test/recon_cossim_per_iter": test_recon_cossim / len(image),
+                        "test/recon_mse_per_iter": test_recon_mse / len(image),
+                        "test/loss_prior_per_iter": test_loss_prior_total / len(image),
+                        "test/loss_clip_per_iter": test_loss_clip_total / len(image),
+                    })
+
+            # assert (test_i+1) == 1
+            logs = {"train/loss": np.mean(losses[-(train_i+1):]),
+                "test/loss": np.mean(test_losses[-(test_i+1):]),
+                "train/lr": lrs[-1],
+                "train/num_steps": len(losses),
+                "test/num_steps": len(test_losses),
+                "train/fwd_pct_correct": fwd_percent_correct / (train_i + 1),
+                "train/bwd_pct_correct": bwd_percent_correct / (train_i + 1),
+                "test/test_fwd_pct_correct": test_fwd_percent_correct / (test_i + 1),
+                "test/test_bwd_pct_correct": test_bwd_percent_correct / (test_i + 1),
+                "train/loss_clip_total": loss_clip_total / (train_i + 1),
+                "train/loss_blurry_total": loss_blurry_total / (train_i + 1),
+                "train/loss_blurry_cont_total": loss_blurry_cont_total / (train_i + 1),
+                "test/loss_clip_total": test_loss_clip_total / (test_i + 1),
+                "train/blurry_pixcorr": blurry_pixcorr / (train_i + 1),
+                "test/blurry_pixcorr": test_blurry_pixcorr / (test_i + 1),
+                "train/recon_cossim": recon_cossim / (train_i + 1),
+                "test/recon_cossim": test_recon_cossim / (test_i + 1),
+                "train/recon_mse": recon_mse / (train_i + 1),
+                "test/recon_mse": test_recon_mse / (test_i + 1),
+                "train/loss_prior": loss_prior_total / (train_i + 1),
+                "test/loss_prior": test_loss_prior_total / (test_i + 1),
+                }
+
+            # if finished training, save jpg recons if they exist
+            if (epoch == num_epochs-1) or (epoch % ckpt_interval == 0):
+                if blurry_recon:    
+                    image_enc = autoenc.encode(2*image[:4]-1).latent_dist.mode() * 0.18215
+                    # transform blurry recon latents to images and plot it
+                    fig, axes = plt.subplots(1, 8, figsize=(10, 4))
+                    jj=-1
+                    for j in [0,1,2,3]:
+                        jj+=1
+                        axes[jj].imshow(utils.torch_to_Image((autoenc.decode(image_enc[[j]]/0.18215).sample / 2 + 0.5).clamp(0,1)))
+                        axes[jj].axis('off')
+                        jj+=1
+                        axes[jj].imshow(utils.torch_to_Image((autoenc.decode(image_enc_pred[[j]]/0.18215).sample / 2 + 0.5).clamp(0,1)))
+                        axes[jj].axis('off')
+
                     if wandb_log:
-                        wandb.log({
-                            "test/loss_per_iter": loss.item(),
-                            "test/blurry_pixcorr_per_iter": test_blurry_pixcorr / len(image),
-                            "test/recon_cossim_per_iter": test_recon_cossim / len(image),
-                            "test/recon_mse_per_iter": test_recon_mse / len(image),
-                            "test/loss_prior_per_iter": test_loss_prior_total / len(image),
-                            "test/loss_clip_per_iter": test_loss_clip_total / len(image),
-                        })
+                        logs[f"test/blur_recons"] = wandb.Image(fig, caption=f"epoch{epoch:03d}")
+                        plt.close()
+                    else:
+                        plt.show()
 
-                # assert (test_i+1) == 1
-                logs = {"train/loss": np.mean(losses[-(train_i+1):]),
-                    "test/loss": np.mean(test_losses[-(test_i+1):]),
-                    "train/lr": lrs[-1],
-                    "train/num_steps": len(losses),
-                    "test/num_steps": len(test_losses),
-                    "train/fwd_pct_correct": fwd_percent_correct / (train_i + 1),
-                    "train/bwd_pct_correct": bwd_percent_correct / (train_i + 1),
-                    "test/test_fwd_pct_correct": test_fwd_percent_correct / (test_i + 1),
-                    "test/test_bwd_pct_correct": test_bwd_percent_correct / (test_i + 1),
-                    "train/loss_clip_total": loss_clip_total / (train_i + 1),
-                    "train/loss_blurry_total": loss_blurry_total / (train_i + 1),
-                    "train/loss_blurry_cont_total": loss_blurry_cont_total / (train_i + 1),
-                    "test/loss_clip_total": test_loss_clip_total / (test_i + 1),
-                    "train/blurry_pixcorr": blurry_pixcorr / (train_i + 1),
-                    "test/blurry_pixcorr": test_blurry_pixcorr / (test_i + 1),
-                    "train/recon_cossim": recon_cossim / (train_i + 1),
-                    "test/recon_cossim": test_recon_cossim / (test_i + 1),
-                    "train/recon_mse": recon_mse / (train_i + 1),
-                    "test/recon_mse": test_recon_mse / (test_i + 1),
-                    "train/loss_prior": loss_prior_total / (train_i + 1),
-                    "test/loss_prior": test_loss_prior_total / (test_i + 1),
-                    }
-
-                # if finished training, save jpg recons if they exist
-                if (epoch == num_epochs-1) or (epoch % ckpt_interval == 0):
-                    if blurry_recon:    
-                        image_enc = autoenc.encode(2*image[:4]-1).latent_dist.mode() * 0.18215
-                        # transform blurry recon latents to images and plot it
-                        fig, axes = plt.subplots(1, 8, figsize=(10, 4))
-                        jj=-1
-                        for j in [0,1,2,3]:
-                            jj+=1
-                            axes[jj].imshow(utils.torch_to_Image((autoenc.decode(image_enc[[j]]/0.18215).sample / 2 + 0.5).clamp(0,1)))
-                            axes[jj].axis('off')
-                            jj+=1
-                            axes[jj].imshow(utils.torch_to_Image((autoenc.decode(image_enc_pred[[j]]/0.18215).sample / 2 + 0.5).clamp(0,1)))
-                            axes[jj].axis('off')
-
-                        if wandb_log:
-                            logs[f"test/blur_recons"] = wandb.Image(fig, caption=f"epoch{epoch:03d}")
-                            plt.close()
-                        else:
-                            plt.show()
-
-                if wandb_log: wandb.log(logs)
+            if wandb_log: wandb.log(logs)
                 
         # Save model checkpoint and reconstruct
         if (ckpt_saving) and (epoch % ckpt_interval == 0):
