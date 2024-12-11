@@ -512,15 +512,19 @@ def train(args, model, diffusion_prior, train_dl, test_dl, accelerator, data_typ
 
                 lens = torch.ones(voxels.shape[0], dtype=torch.long)*voxels.shape[-1]
 
-                image_idx = image_idx.cpu().long().numpy()
-                _, img_sorted_idx = np.unique(image_idx, return_index=True)
-                voxel0 = voxels[img_sorted_idx]
-                image = images[img_sorted_idx]
-                coords = coords[img_sorted_idx]
+                # image_idx = image_idx.cpu().long().numpy()
+                # _, img_sorted_idx = np.unique(image_idx, return_index=True) # this breaks multi gpu training
+                # voxel0 = voxels[img_sorted_idx]
+                # image = images[img_sorted_idx]
+                # coords = coords[img_sorted_idx]
+                voxel0 = voxels
+                image = images
+                coords = coords
+                
 
                 if epoch < int(mixup_pct * num_epochs):
                     voxel0, perm, betas, select = utils.mixco(voxel0)
-
+                
                 if use_image_aug: 
                     image = img_augment(image)
 
@@ -551,6 +555,7 @@ def train(args, model, diffusion_prior, train_dl, test_dl, accelerator, data_typ
                             clip_voxels_norm,
                             clip_target_norm,
                             temp=.006,
+                            accelerator=accelerator,
                             perm=perm, betas=betas, select=select)
                     else:
                         epoch_temp = soft_loss_temps[epoch-int(mixup_pct*num_epochs)]
@@ -666,7 +671,7 @@ def train(args, model, diffusion_prior, train_dl, test_dl, accelerator, data_typ
                 if test_image is None:
                     voxel = voxels
                     image = image_idx
-                    unique_image, sort_indices = torch.unique(image, return_inverse=True)
+                    unique_image, sort_indices = torch.unique(image, return_inverse=True) # this will break multi gpu inference if wanting to do all clip
                     for im in unique_image:
                         locs = torch.where(im == image_idx)[0]
                         if len(locs)==1:
@@ -721,7 +726,7 @@ def train(args, model, diffusion_prior, train_dl, test_dl, accelerator, data_typ
                     loss_clip = utils.soft_clip_loss(
                         clip_voxels_norm,
                         clip_target_norm,
-                        accelerator,
+                        accelerator=accelerator,
                         temp=.006)
 
                     test_loss_clip_total += loss_clip.item()
@@ -800,7 +805,7 @@ def train(args, model, diffusion_prior, train_dl, test_dl, accelerator, data_typ
                     else:
                         plt.show()
 
-            if wandb_log:
+            if wandb_log and accelerator.is_main_process:
                 wandb.log(logs, step=global_iteration)
                 
         # Save model checkpoint and reconstruct
@@ -834,11 +839,12 @@ def main():
             import wandb
             # Try to resume wandb run if it exists
             try:
+                d = time.strftime("%Y_%m_%d_%H_%M_%S", )
                 wandb.init(
                     entity='nyu_brain_decoding',
                     project=args.wandb_project,
                     name=args.model_name,
-                    id=args.model_name,
+                    id=f"{args.model_name}--{d}",
                     resume="allow",
                     config=vars(args)
                 )

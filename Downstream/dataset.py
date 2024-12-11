@@ -53,7 +53,8 @@ class SubjectBatchSampler(Sampler):
         batches = []
         for indices in subject_to_indices.values():
             random.shuffle(indices)
-            for i in range(0, len(indices), self.batch_size):
+            num_indices = len(indices) // self.batch_size * self.batch_size # drop last
+            for i in range(0, num_indices, self.batch_size):
                 batch = indices[i:i + self.batch_size]
                 batches.append(batch)
 
@@ -157,5 +158,4 @@ if __name__ == "__main__":
     
     for i, (images, voxels, subjects, coords, image_idx) in enumerate(dataloader):
         print(images.shape, voxels.shape, subjects.shape, coords.shape, image_idx.shape)
-        break
     

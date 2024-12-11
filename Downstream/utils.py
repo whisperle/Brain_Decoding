@@ -14,6 +14,7 @@ import json
 from PIL import Image
 import requests
 import time 
+from accelerate import Accelerator
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -132,7 +133,7 @@ def gather_features(image_features, voxel_features, accelerator):
 
 def soft_clip_loss(preds, targs, accelerator=None, temp=0.125):
     # Gather tensors across all GPUs if using distributed training
-    if accelerator is not None:
+    if accelerator is not None and accelerator.num_processes > 1:
         preds = accelerator.gather(preds)
         targs = accelerator.gather(targs)
     
@@ -148,7 +149,7 @@ def soft_clip_loss(preds, targs, accelerator=None, temp=0.125):
     # Scale the loss to avoid over-counting gradients.
     # By default, each GPU now sees the entire global batch and calls backward.
     # To correct for this, divide by the number of processes.
-    if accelerator is not None:
+    if accelerator is not None and accelerator.num_processes > 1:
         world_size = accelerator.num_processes
         loss = loss / world_size
     
@@ -201,8 +202,21 @@ def mixco_clip_target(clip_target, perm, select, betas):
         clip_target_shuffle[select] * (1 - betas[select]).reshape(-1, 1)
     return clip_target
 
+MINFLOAT=torch.finfo(torch.bfloat16).min
+MAXFLOAT=torch.finfo(torch.bfloat16).max
+
 def mixco_nce(preds, targs, temp=0.1, perm=None, betas=None, select=None, distributed=False, 
-              accelerator=None, local_rank=None, bidirectional=True):
+              accelerator: Accelerator =None, local_rank=None, bidirectional=True):
+
+    if accelerator is not None and accelerator.num_processes > 1:
+        preds = accelerator.gather(preds)
+        targs = accelerator.gather(targs)
+        if betas is not None:
+            betas = accelerator.gather(betas)
+        if perm is not None:
+            perm = accelerator.gather(perm.to(preds.device)) # perm is not cuda
+    
+
     brain_clip = (preds @ targs.T)/temp
     
     if perm is not None and betas is not None and select is not None:
@@ -213,13 +227,18 @@ def mixco_nce(preds, targs, temp=0.1, perm=None, betas=None, select=None, distri
         if bidirectional:
             loss2 = -(brain_clip.T.log_softmax(-1) * probs.T).sum(-1).mean()
             loss = (loss + loss2)/2
-        return loss
+
     else:
         loss =  F.cross_entropy(brain_clip, torch.arange(brain_clip.shape[0]).to(brain_clip.device))
         if bidirectional:
             loss2 = F.cross_entropy(brain_clip.T, torch.arange(brain_clip.shape[0]).to(brain_clip.device))
             loss = (loss + loss2)/2
-        return loss
+    
+    if accelerator is not None and accelerator.num_processes > 1:
+        world_size = accelerator.num_processes
+        loss = loss / world_size
+    
+    return loss
     
 def count_params(model):
     total = sum(p.numel() for p in model.parameters())

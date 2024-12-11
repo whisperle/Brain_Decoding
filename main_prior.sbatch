@@ -66,7 +66,7 @@ accelerate launch --num_processes=${NUM_GPUS} --main_process_port=${MASTER_PORT}
     --seed=42 \
     --no-use_mixer \
     --new_test \
-    --wandb_project=fmri_new \
+    --wandb_project=main_fmri \
     --full_attention \
     --n_blocks_decoder=6 \
     --drop=0.1 \

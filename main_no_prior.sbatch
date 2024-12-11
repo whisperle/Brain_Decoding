@@ -37,7 +37,7 @@ export SSL_CERT_FILE=/scratch/yz10381/CODES/IVP/Brain_Decoding/tmp/cacert.pem
 accelerate launch --num_processes=${NUM_GPUS} --main_process_port=${MASTER_PORT} --mixed_precision=fp16 Train.py\
     --data_path=/scratch/cl6707/Shared_Datasets/NSD_MindEye/Mindeye2 \
     --cache_dir=/scratch/cl6707/Shared_Datasets/NSD_MindEye/Mindeye2 \
-    --model_name=main_no_prior\
+    --model_name=main_no_prior \
     --multi_subject="2,3,4,5,6,7,8" \
     --subj=2 \
     --batch_size=${BATCH_SIZE} \
@@ -66,7 +66,7 @@ accelerate launch --num_processes=${NUM_GPUS} --main_process_port=${MASTER_PORT}
     --seed=42 \
     --no-use_mixer \
     --new_test \
-    --wandb_project=fmri_new \
+    --wandb_project=main_fmri \
     --full_attention \
     --n_blocks_decoder=6 \
     --drop=0.1 \
