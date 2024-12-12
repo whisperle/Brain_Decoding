@@ -28,6 +28,9 @@ sys.path.append('generative_models/')
 import sgm
 from generative_models.sgm.modules.encoders.modules import FrozenOpenCLIPImageEmbedder  # bigG embedder
 
+sys.path.append('../')
+from pretraining.utils import load_checkpoint
+
 # Enable tf32 for faster computation
 torch.backends.cuda.matmul.allow_tf32 = True
 
@@ -203,6 +206,18 @@ def parse_arguments():
         "--dim_scale_factor", type=float, default=1.0,
         help="Power factor for dimension scaling (0.5 = square root scaling)",
     )
+    parser.add_argument(
+        "--finetuning", action=argparse.BooleanOptionalAction, default=False,
+        help="Finetune on pretrain encoder",
+    )
+    parser.add_argument(
+        "--pretrained_ckpt", type=str, default=None,
+        help="Path to pre-trained multisubject model to finetune a single subject from. ",
+    )
+    parser.add_argument(
+        "--freeze_pretrained_weights", action=argparse.BooleanOptionalAction, default=False,
+        help="Whether to freeze pretrain encoder",
+    )
     args = parser.parse_args()
     return args
 
@@ -270,6 +285,9 @@ def build_model(args, device, data_type):
         blur_augs = None
 
     model = NAT_BrainNet(args, clip_emb_dim, clip_seq_dim).to(device)
+
+    if args.finetuning:
+        load_checkpoint(args.pretrained_ckpt, model.brain_nat, args.freeze_pretrained_weights)
 
     # Optional Prior Network
     if args.use_prior:
