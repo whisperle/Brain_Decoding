@@ -134,8 +134,8 @@ def gather_features(image_features, voxel_features, accelerator):
 def soft_clip_loss(preds, targs, accelerator=None, temp=0.125):
     # Gather tensors across all GPUs if using distributed training
     if accelerator is not None and accelerator.num_processes > 1:
-        preds = accelerator.gather(preds)
-        targs = accelerator.gather(targs)
+        preds = torch.cat(torch.distributed.nn.all_gather(preds), dim=0)
+        targs = torch.cat(torch.distributed.nn.all_gather(targs), dim=0)
     
     clip_clip = (targs @ targs.T) / temp
     brain_clip = (preds @ targs.T) / temp
@@ -148,11 +148,7 @@ def soft_clip_loss(preds, targs, accelerator=None, temp=0.125):
     
     # Scale the loss to avoid over-counting gradients.
     # By default, each GPU now sees the entire global batch and calls backward.
-    # To correct for this, divide by the number of processes.
-    if accelerator is not None and accelerator.num_processes > 1:
-        world_size = accelerator.num_processes
-        loss = loss / world_size
-    
+    # To correct for this, divide by the number of processes.    
     return loss
 
 def soft_siglip_loss(preds, targs, temp, bias):
@@ -209,8 +205,8 @@ def mixco_nce(preds, targs, temp=0.1, perm=None, betas=None, select=None, distri
               accelerator: Accelerator =None, local_rank=None, bidirectional=True):
 
     if accelerator is not None and accelerator.num_processes > 1:
-        preds = accelerator.gather(preds)
-        targs = accelerator.gather(targs)
+        preds = torch.cat(torch.distributed.nn.all_gather(preds), dim=0)
+        targs = torch.cat(torch.distributed.nn.all_gather(targs), dim=0)
         if betas is not None:
             betas = accelerator.gather(betas)
         if perm is not None:
@@ -233,10 +229,6 @@ def mixco_nce(preds, targs, temp=0.1, perm=None, betas=None, select=None, distri
         if bidirectional:
             loss2 = F.cross_entropy(brain_clip.T, torch.arange(brain_clip.shape[0]).to(brain_clip.device))
             loss = (loss + loss2)/2
-    
-    if accelerator is not None and accelerator.num_processes > 1:
-        world_size = accelerator.num_processes
-        loss = loss / world_size
     
     return loss
     

@@ -468,7 +468,7 @@ def train(args, model, diffusion_prior, train_dl, test_dl, accelerator, data_typ
         disable=not accelerator.is_local_main_process
     )
     
-    global_iteration = 0
+    global_iteration = epoch_start * num_iterations_per_epoch
     for epoch in epoch_progress:
         model.train()
         iteration = 0
@@ -626,13 +626,13 @@ def train(args, model, diffusion_prior, train_dl, test_dl, accelerator, data_typ
                 if accelerator.is_main_process and wandb_log:
                     wandb.log({
                         "train/loss_per_iter": loss.item(),
-                        "train/blurry_pixcorr_per_iter": blurry_pixcorr_per_iter / args.batch_size,
-                        "train/recon_cossim_per_iter": recon_cossim_per_iter / args.batch_size,
-                        "train/recon_mse_per_iter": recon_mse_per_iter / args.batch_size,
-                        "train/loss_prior_per_iter": loss_prior_per_iter / args.batch_size,
-                        "train/loss_clip_per_iter": loss_clip_per_iter / args.batch_size,
-                        "train/loss_blurry_per_iter": loss_blurry_per_iter / args.batch_size,
-                        "train/loss_blurry_cont_per_iter": loss_blurry_cont_per_iter / args.batch_size,
+                        "train/blurry_pixcorr_per_iter": blurry_pixcorr_per_iter,
+                        "train/recon_cossim_per_iter": recon_cossim_per_iter,
+                        "train/recon_mse_per_iter": recon_mse_per_iter,
+                        "train/loss_prior_per_iter": loss_prior_per_iter,
+                        "train/loss_clip_per_iter": loss_clip_per_iter,
+                        "train/loss_blurry_per_iter": loss_blurry_per_iter,
+                        "train/loss_blurry_cont_per_iter": loss_blurry_cont_per_iter,
                     }, step=global_iteration)
 
                 iteration += 1
@@ -714,13 +714,13 @@ def train(args, model, diffusion_prior, train_dl, test_dl, accelerator, data_typ
                 random_samps = np.random.choice(np.arange(len(image)), size=len(image)//5, replace=False)
                 
                 if use_prior:
-                    diffusion_prior(text_embed=backbone[random_samps], image_embed=clip_target[random_samps])
+                    loss_prior, prior_out = diffusion_prior(text_embed=backbone[random_samps], image_embed=clip_target[random_samps])
                     test_loss_prior_total += loss_prior.item()
                     loss_prior *= prior_scale
                     loss += loss_prior
                     # TODO: this two line was not tested
-                    test_recon_cossim += nn.functional.cosine_similarity(prior_out, clip_target).mean().item()
-                    test_recon_mse += mse(prior_out, clip_target).item()
+                    test_recon_cossim += nn.functional.cosine_similarity(prior_out, clip_target[random_samps]).mean().item()
+                    test_recon_mse += mse(prior_out, clip_target[random_samps]).item()
                 
                 if clip_scale>0:
                     loss_clip = utils.soft_clip_loss(
