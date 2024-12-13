@@ -353,25 +353,28 @@ def soft_cont_loss(student_preds, teacher_preds, teacher_aug_preds, temp=0.125):
     loss = (loss1 + loss2)/2
     return loss
 
-def save_ckpt(tag, args, model, optimizer, lr_scheduler, epoch, losses, test_losses, lrs, accelerator, ckpt_saving=True):
+def save_ckpt(tag, args, model, diffusion_prior, optimizer, lr_scheduler, epoch, losses, test_losses, lrs, accelerator, ckpt_saving=True):
     outdir = os.path.abspath(f'../train_logs/{args.model_name}')
     if not os.path.exists(outdir) and ckpt_saving:
         os.makedirs(outdir,exist_ok=True)
     ckpt_path = outdir+f'/{tag}.pth'
     if accelerator.is_main_process:
-        unwrapped_model = accelerator.unwrap_model(model)
-        torch.save({
+        save_dict = {
             'epoch': epoch,
-            'model_state_dict': unwrapped_model.state_dict(),
+            'model_state_dict': accelerator.unwrap_model(model).state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
             'lr_scheduler': lr_scheduler.state_dict(),
             'train_losses': losses,
             'test_losses': test_losses,
             'lrs': lrs,
-            }, ckpt_path)
+        }
+        if diffusion_prior is not None:
+            save_dict['diffusion_prior'] = accelerator.unwrap_model(diffusion_prior).state_dict()
+    
+        torch.save(save_dict, ckpt_path)
     print(f"\n---saved {outdir}/{tag} ckpt!---\n")
 
-def load_ckpt(args, model, optimizer=None, lr_scheduler=None, accelerator=None, tag='last', strict=True):
+def load_ckpt(args, model, diffusion_prior=None, optimizer=None, lr_scheduler=None, accelerator=None, tag='last', strict=True):
     """
     Load checkpoint for model, optimizer, and training state.
     If specified tag not found, will try to find latest iteration checkpoint.
@@ -423,13 +426,27 @@ def load_ckpt(args, model, optimizer=None, lr_scheduler=None, accelerator=None, 
             print(f"Loading checkpoint from {ckpt_path}")
             # Load checkpoint on CPU to avoid GPU RAM spike
             ckpt = torch.load(ckpt_path, map_location='cpu')
-            
+        
+            if diffusion_prior is not None and 'diffusion_prior' in ckpt:
+                diffusion_prior_state_dict = ckpt['diffusion_prior']
+            elif diffusion_prior is not None:
+                raise ValueError("Diffusion prior state not found in checkpoint, but have diffusion prior model")
+            elif diffusion_prior is None and 'diffusion_prior' in ckpt:
+                raise ValueError("Diffusion prior state found in checkpoint, but no diffusion prior model")
+            else:
+                print("No diffusion prior model")
+
             # Load model state
             if accelerator is not None:
                 unwrapped_model = accelerator.unwrap_model(model)
                 unwrapped_model.load_state_dict(ckpt['model_state_dict'], strict=strict)
+                if diffusion_prior is not None:
+                    unwrapped_diffusion_prior = accelerator.unwrap_model(diffusion_prior)
+                    unwrapped_diffusion_prior.load_state_dict(diffusion_prior_state_dict, strict=strict)               
             else:
                 model.load_state_dict(ckpt['model_state_dict'], strict=strict)
+                if diffusion_prior is not None:
+                    diffusion_prior.load_state_dict(diffusion_prior_state_dict, strict=strict)
             
             # Load optimizer state if provided
             if optimizer is not None and 'optimizer_state_dict' in ckpt:

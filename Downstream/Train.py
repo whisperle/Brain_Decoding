@@ -639,8 +639,18 @@ def train(args, model, diffusion_prior, train_dl, test_dl, accelerator, data_typ
                 global_iteration += 1
                 if accelerator.is_main_process:
                     if global_iteration % args.ckpt_iter == 0 and ckpt_saving:
-                        save_ckpt(f'iter_{global_iteration}', args, accelerator.unwrap_model(model), optimizer, lr_scheduler, epoch, losses, test_losses, lrs, accelerator, ckpt_saving=True)
-
+                        save_ckpt(f'iter_{global_iteration}',
+                                  args,
+                                  accelerator.unwrap_model(model),
+                                  None if diffusion_prior is None else accelerator.unwrap_model(diffusion_prior),
+                                  optimizer,
+                                  lr_scheduler,
+                                  epoch,
+                                  losses,
+                                  test_losses,
+                                  lrs,
+                                  accelerator,
+                                  ckpt_saving=True)
         model.eval()
         test_image, test_voxel, test_coords, test_lens = None, None, None, None
         
@@ -810,7 +820,18 @@ def train(args, model, diffusion_prior, train_dl, test_dl, accelerator, data_typ
                 
         # Save model checkpoint and reconstruct
         if (ckpt_saving) and (epoch % ckpt_interval == 0):
-            save_ckpt(f'last',args,accelerator.unwrap_model(model),optimizer,lr_scheduler,epoch, losses, test_losses, lrs, accelerator, ckpt_saving=True)
+            save_ckpt(f'last',
+                      args,
+                      accelerator.unwrap_model(model),
+                      None if diffusion_prior is None else accelerator.unwrap_model(diffusion_prior),
+                      optimizer,
+                      lr_scheduler,
+                      epoch,
+                      losses,
+                      test_losses,
+                      lrs,
+                      accelerator,
+                      ckpt_saving=True)
 
         # wait for other GPUs to catch up if needed
         accelerator.wait_for_everyone()
