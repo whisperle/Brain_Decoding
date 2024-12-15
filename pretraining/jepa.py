@@ -41,7 +41,11 @@ def parse_arguments():
         help="Path to where miscellaneous files downloaded from huggingface are stored. Defaults to current directory.",
     )
     parser.add_argument(
-        "--batch_size", type=int, default=64,
+        "--num_sessions", type=int, default=40,
+        help="Number of training sessions to include",
+    )
+    parser.add_argument(
+        "--batch_size", type=int, default=16,
         help="Batch size can be increased by 10x if only training retrieval submodule and not diffusion prior",
     )
     parser.add_argument(
