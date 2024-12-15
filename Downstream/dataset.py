@@ -37,10 +37,11 @@ class MindEye2Dataset(Dataset):
         return torch.tensor(self.images[image_id],dtype=self.data_type), self.voxels[f'subj0{subj_id}'][voxel_id].view(1,-1), subj_id, coord, image_id
 
 class SubjectBatchSampler(Sampler):
-    def __init__(self, dataset, batch_size):
+    def __init__(self, dataset, batch_size, shuffle=True):
         self.dataset = dataset
         self.batch_size = batch_size
         self.batches = []
+        self.shuffle = shuffle
         self.create_batches()
 
     def create_batches(self):
@@ -52,13 +53,15 @@ class SubjectBatchSampler(Sampler):
 
         batches = []
         for indices in subject_to_indices.values():
-            random.shuffle(indices)
+            if self.shuffle:
+                random.shuffle(indices)
             num_indices = len(indices) // self.batch_size * self.batch_size # drop last
             for i in range(0, num_indices, self.batch_size):
                 batch = indices[i:i + self.batch_size]
                 batches.append(batch)
 
-        random.shuffle(batches)
+        if self.shuffle:
+            random.shuffle(batches)
         self.batches = batches
 
     def __iter__(self):

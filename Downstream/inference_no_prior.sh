@@ -3,7 +3,7 @@ SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
 BATCH_SIZE=32
 overlay_ext3=/scratch/yz10381/singularity/fMRI.ext3
 PYTHON_CMD="python recon_inference.py"
-MODEL_NAME="main_prior_large"
+MODEL_NAME="main_no_prior"
 CMD="
 source /ext3/env.sh
 cd ${SCRIPT_DIR}
@@ -20,15 +20,15 @@ ${PYTHON_CMD} \
     --max_lr=5e-05 \
     --mixup_pct=0.33 \
     --num_epochs=150 \
-    --use_prior \
+    --no-use_prior \
     --prior_scale=30 \
     --clip_scale=1 \
     --no-blurry_recon \
     --blur_scale=0.5 \
     --no-use_image_aug \
     --n_blocks=4 \
-    --encoder_hidden_dim=320 \
-    --decoder_hidden_dim=1280 \
+    --encoder_hidden_dim=256 \
+    --decoder_hidden_dim=512 \
     --num_sessions=40 \
     --ckpt_interval=3 \
     --ckpt_saving \
