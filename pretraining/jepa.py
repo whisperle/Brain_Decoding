@@ -41,7 +41,7 @@ def parse_arguments():
         help="Path to where miscellaneous files downloaded from huggingface are stored. Defaults to current directory.",
     )
     parser.add_argument(
-        "--batch_size", type=int, default=128,
+        "--batch_size", type=int, default=64,
         help="Batch size can be increased by 10x if only training retrieval submodule and not diffusion prior",
     )
     parser.add_argument(
@@ -49,7 +49,7 @@ def parse_arguments():
         help="Whether to log to wandb",
     )
     parser.add_argument(
-        "--wandb_project", type=str, default="BRAIN_NAT_Pretraining",
+        "--wandb_project", type=str, default="BrainNAT_JEPA",
         help="wandb project name",
     )
     parser.add_argument(
@@ -91,7 +91,7 @@ def parse_arguments():
         help="Number of features in the last layer of BrainNAT",
     )
     parser.add_argument(
-        "--nat_depth", type=int, default=6,
+        "--nat_depth", type=int, default=8,
         help="Depth of the BrainNAT model",
     )
     parser.add_argument(
@@ -129,10 +129,9 @@ else:
     torch.cuda.set_device(device)
 
 # build model
-hidden_dim_nat = args.hidden_dim//4
 encoder = BrainNAT(
     in_chans=1,
-    embed_dim=hidden_dim_nat,
+    embed_dim=args.hidden_dim,
     depth=args.nat_depth,
     num_heads=args.num_heads,
     num_neighbors=args.nat_num_neighbors,
@@ -149,7 +148,7 @@ for p in target_encoder.parameters():
     p.requires_grad = False
 
 # mask token
-embed_dim = 2 ** int(torch.log2(torch.tensor(hidden_dim_nat)).ceil().item())
+embed_dim = 2 ** int(torch.log2(torch.tensor(args.hidden_dim)).ceil().item())
 mask_token = nn.Parameter(torch.randn(1, embed_dim, device=device))
 
 # create dataloader
