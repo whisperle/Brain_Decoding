@@ -218,6 +218,9 @@ def parse_arguments():
         "--freeze_pretrained_weights", action=argparse.BooleanOptionalAction, default=False,
         help="Whether to freeze pretrain encoder",
     )
+    parser.add_argument(
+        "--wandb_entity", type=str, default='nyu_brain_decoding'
+    )
     args = parser.parse_args()
     return args
 
@@ -438,7 +441,7 @@ def setup_wandb(args,train_url="", test_url=""):
         import wandb
         print(f"wandb {args.wandb_project} run {args.model_name}")
         wandb.init(
-            entity='nyu_brain_decoding',
+            entity=args.wandb_entity,
             id=args.model_name,
             project=args.wandb_project,
             name=args.model_name,
@@ -848,7 +851,7 @@ def main():
             # Try to resume wandb run if it exists
             try:
                 wandb.init(
-                    entity='nyu_brain_decoding',
+                    entity=args.wandb_entity,
                     project=args.wandb_project,
                     name=args.model_name,
                     id=args.model_name,
@@ -859,7 +862,7 @@ def main():
             except wandb.errors.UsageError:
                 # If run doesn't exist, start new one
                 wandb.init(
-                    entity='nyu_brain_decoding',
+                    entity=args.wandb_entity,
                     project=args.wandb_project,
                     name=args.model_name,
                     config=vars(args)
