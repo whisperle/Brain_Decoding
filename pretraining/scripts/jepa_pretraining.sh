@@ -13,11 +13,15 @@ NUM_MASKS_ARRAY=(4 8 16)
 NUM_MASKS=${NUM_MASKS_ARRAY[$SLURM_ARRAY_TASK_ID]}
 
 MODEL_NAME="num_masks_${NUM_MASKS}_mask_ratio_0.8"
+PRETRAINED_CKPT="/scratch/cc6946/projects/Brain_Decoding/pretraining/ckpt/num_masks_${NUM_MASKS}_mask_ratio_0.8/last.pth"
 
 singularity exec --nv \
     --overlay /scratch/cc6946/envs/neural-decoding/fMRI.ext3:ro \
     /scratch/work/public/singularity/cuda12.1.1-cudnn8.9.0-devel-ubuntu22.04.2.sif \
     /bin/bash -c " \
     source /ext3/env.sh; \
-    cd /scratch/cc6946/projects/Brain_Decoding/pretraining; \
-    python jepa.py --wandb_log --model_name=${MODEL_NAME} --num_masks=${NUM_MASKS} --mask_ratio=0.8"
+    cd /scratch/cc6946/projects/Brain_Decoding/Downstream; \
+    python Train.py --wandb_log --ckpt_saving --model_name=${MODEL_NAME} --num_session=40 \
+    --batch_size=4 --wandb_project=BraiNAT_Finetune --multisubject=1 --decoder_hidden_dim=512 \
+    --encoder_hidden_dim=256 --num_heads=8 --tome_r=1000 --nat_depth=8 --drop=0.1 \
+    --finetuning --pretrained_ckpt=${PRETRAINED_CKPT} --freeze_pretrained_weights"
