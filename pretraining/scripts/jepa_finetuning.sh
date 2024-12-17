@@ -3,14 +3,14 @@
 #SBATCH --nodes=1           
 #SBATCH --gres=gpu:1
 #SBATCH --mem=64GB
-#SBATCH --time=48:00:00 
+#SBATCH --time=24:00:00 
 #SBATCH --constraint="a100|h100"
 #SBATCH --account=pr_60_tandon_advanced
-#SBATCH --array=0-2
+#SBATCH --array=0-3
 
 export SSL_CERT_FILE=/scratch/cc6946/cacert.pem
 
-NUM_MASKS_ARRAY=(4 8 16)
+NUM_MASKS_ARRAY=(1 2 3 4)
 
 NUM_MASKS=${NUM_MASKS_ARRAY[$SLURM_ARRAY_TASK_ID]}
 

@@ -161,8 +161,10 @@ train_data = MindEye2Dataset(args, data_type, 'train')
 train_sampler = SubjectBatchSampler(train_data, args.batch_size)
 mask_collator = MaskCollator(args.mask_ratio, args.num_masks)
 train_dl = torch.utils.data.DataLoader(train_data, batch_sampler=train_sampler, collate_fn=mask_collator, num_workers=4, pin_memory=True)
+print('Dataset size:', len(train_data))
 
 num_iterations_per_epoch = len(train_data) // args.batch_size
+print('Number of iterations per epoch:', num_iterations_per_epoch)
 
 # set optimizer
 no_decay = ['bias', 'LayerNorm.bias', 'LayerNorm.weight']
@@ -251,7 +253,7 @@ for epoch in range(args.num_epochs):
                 param_k.data.mul_(m).add_((1. - m) * param_q.detach().data)
 
         if args.wandb_log:
-            wandb.log({"Loss": loss.item()})
+            wandb.log({"Loss": loss.item(), "Momentum": m})
 
         running_loss += loss.item()
 

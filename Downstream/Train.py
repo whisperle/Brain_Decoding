@@ -230,12 +230,16 @@ def prepare_data(args, data_type):
     train_data = MindEye2Dataset(args, data_type, 'train')
     train_sampler = SubjectBatchSampler(train_data, args.batch_size)
     train_dl = torch.utils.data.DataLoader(train_data, batch_sampler=train_sampler, collate_fn=custom_collate_fn, num_workers=16, pin_memory=True, persistent_workers=True)
+    print('Training data size:', len(train_data))
 
     test_data = MindEye2Dataset(args, data_type, 'test')
     test_sampler = SubjectBatchSampler(test_data, args.batch_size)
     test_dl = torch.utils.data.DataLoader(test_data, batch_sampler=test_sampler, collate_fn=custom_collate_fn, num_workers=16, pin_memory=True, persistent_workers=True)
+    print('Testing data size:', len(train_data))
 
     num_iterations_per_epoch = len(train_data) // args.batch_size
+    print('Number of iterations per epoch:', num_iterations_per_epoch)
+    
     return train_dl, test_dl, len(test_data), num_iterations_per_epoch
 
 def build_model(args, device, data_type):
