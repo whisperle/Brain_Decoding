@@ -259,7 +259,7 @@ for epoch in range(args.num_epochs):
 
     avg_loss = running_loss / len(train_dl)
     if args.wandb_log:
-        wandb.log({"Average Loss per Epoch": avg_loss})
+        wandb.log({"Average Loss per Epoch": avg_loss, "Epoch": epoch+1})
 
     if args.ckpt_saving and (epoch % args.ckpt_interval == 0 or epoch == (args.num_epochs - 1)):
         ckpt_path = os.path.join(args.ckpt_path, args.model_name)
