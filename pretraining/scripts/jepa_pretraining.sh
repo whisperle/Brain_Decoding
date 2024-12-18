@@ -8,6 +8,8 @@
 #SBATCH --account=pr_60_tandon_advanced
 #SBATCH --array=0-2
 
+export SSL_CERT_FILE=/scratch/cc6946/cacert.pem
+
 NUM_MASKS_ARRAY=(4 6 8)
 
 NUM_MASKS=${NUM_MASKS_ARRAY[$SLURM_ARRAY_TASK_ID]}

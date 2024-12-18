@@ -216,7 +216,6 @@ def save_checkpoint(epoch, path):
 
 ####################################### Training Loop #######################################
 if args.wandb_log:
-    os.environ['SSL_CERT_FILE'] = '/scratch/cc6946/cacert.pem'
     wandb.init(
         id=args.model_name,
         project=args.wandb_project,
