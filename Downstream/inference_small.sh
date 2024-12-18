@@ -1,6 +1,6 @@
 #!/bin/bash
 
-#SBATCH --job-name=eval_main_prior_large_subj01
+#SBATCH --job-name=eval
 #SBATCH --nodes=1
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=64GB
@@ -15,12 +15,12 @@ SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
 BATCH_SIZE=32
 overlay_ext3=/scratch/yz10381/singularity/fMRI.ext3
 PYTHON_CMD="python recon_inference.py"
-MODEL_NAME="main_prior_large"
+MODEL_NAME="main_no_prior_single_gpu"
 CMD="
 source /ext3/env.sh
 cd ${SCRIPT_DIR}
-export TAG='iter_195000'
-export SAVE_DIR='tests/main_prior_large_subj02'
+export TAG='iter_75000'
+export SAVE_DIR='tests/main_prior_small_subj02'
 
 export SSL_CERT_FILE=/scratch/yz10381/CODES/IVP/Brain_Decoding/tmp/cacert.pem
 
@@ -41,14 +41,14 @@ ${PYTHON_CMD} \
     --blur_scale=0.5 \
     --no-use_image_aug \
     --n_blocks=4 \
-    --encoder_hidden_dim=320 \
-    --decoder_hidden_dim=1280 \
+    --encoder_hidden_dim=160 \
+    --decoder_hidden_dim=512 \
     --num_sessions=40 \
     --ckpt_interval=3 \
     --ckpt_saving \
     --wandb_log \
     --num_heads=8 \
-    --tome_r=1000 \
+    --tome_r=2000 \
     --last_n_features=16 \
     --nat_depth=8 \
     --nat_num_neighbors=8 \

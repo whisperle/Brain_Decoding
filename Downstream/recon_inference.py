@@ -1,7 +1,10 @@
+from collections import defaultdict
 import itertools
+import json
 from omegaconf import OmegaConf
 from tqdm import tqdm
 import numpy as np
+import sys
 import os
 import os.path as osp
 import torch
@@ -31,7 +34,7 @@ def validation_test(
     epoch,
     device,
     save_dir="test",
-    num_eval_batches=None,
+    num_eval_samples=None,
 ):
     os.makedirs(save_dir, exist_ok=True)
     plotting = True
@@ -51,15 +54,15 @@ def validation_test(
     test_losses = []
     test_image, test_voxel, test_coords = None, None, None
     all_clipvoxels, all_predcaptions, all_recons = None, None, None
+    all_cliptargets = None
     with torch.no_grad(), torch.amp.autocast('cuda'): 
         # Add progress bar for test dataloader
-        if num_eval_batches is not None:
-            test_dl = itertools.islice(test_dl, num_eval_batches)
-            num_test = num_eval_batches
+        if num_eval_samples is not None:
+            num_test = num_eval_samples
         else:
-            num_test = len(test_dl)
+            num_test = sys.maxsize # very large number
 
-        test_progress = tqdm(test_dl, desc=f'Testing epoch {epoch}', leave=False, total=num_test)
+        test_progress = tqdm(test_dl, desc=f'Testing epoch {epoch}', leave=False)
         for test_i, (images, voxels, subj_idx, coords, image_idx) in enumerate(test_progress):
             test_image = None
             images = images.to(device)
@@ -78,45 +81,6 @@ def validation_test(
                     'fwd_acc': f"{test_fwd_percent_correct/(test_i+1):.4f}",
                     'bwd_acc': f"{test_bwd_percent_correct/(test_i+1):.4f}"
                 })
-
-            # ## Average same-image repeats ##
-            # if test_image is None:
-            #     voxel = voxels
-            #     unique_image, sort_indices = torch.unique(image_idx, return_inverse=True) # this will break multi gpu inference if wanting to do all clip
-            #     for im in unique_image:
-            #         locs = torch.where(im == image_idx)[0]
-            #         if len(locs)==1:
-            #             locs = locs.repeat(3)
-            #         elif len(locs)==2:
-            #             locs = locs.repeat(2)[:3]
-            #         assert len(locs)==3
-            #         assert image_idx[locs].unique().shape[0]==1
-            #         if test_image is None:
-            #             test_image = torch.Tensor(images[locs,:][0][None])
-            #             test_voxel = voxels[locs][None]
-            #             test_coords = coords[locs][None]
-            #         else:
-            #             test_image = torch.vstack((test_image, torch.Tensor(images[locs,:][0][None]))) # only take the first image from the repeats
-            #             test_voxel = torch.vstack((test_voxel, voxels[locs][None]))
-            #             test_coords = torch.vstack((test_coords, coords[locs][None]))
-            # loss=0.
-            # test_indices = torch.arange(len(test_voxel))
-            # voxel = test_voxel[test_indices]
-            # coords = test_coords[test_indices]
-            # image = test_image[test_indices]
-
-            # clip_target = clip_img_embedder(image)
-            # for rep in range(3):
-            #     backbone0, clip_voxels0, blurry_image_enc_ = model(voxel[:,rep], coords[:,rep])
-            #     if rep==0:
-            #         clip_voxels = clip_voxels0
-            #         backbone = backbone0
-            #     else:
-            #         clip_voxels += clip_voxels0
-            #         backbone += backbone0
-            # clip_voxels /= 3
-            # backbone /= 3
-
             test_voxel = voxels
             test_coords = coords
             test_image = images
@@ -132,9 +96,10 @@ def validation_test(
             # EVAL: Save retrieval submodule outputs
             if all_clipvoxels is None:
                 all_clipvoxels = clip_voxels.cpu()
+                all_cliptargets = clip_target.cpu()
             else:
                 all_clipvoxels = torch.vstack((all_clipvoxels, clip_voxels.cpu()))
-
+                all_cliptargets = torch.vstack((all_cliptargets, clip_target.cpu()))
             # VALIDATION
             if clip_scale>0:
                 clip_voxels_norm = nn.functional.normalize(clip_voxels.flatten(1), dim=-1)
@@ -167,42 +132,42 @@ def validation_test(
                 test_recon_cossim += nn.functional.cosine_similarity(prior_out, clip_target[random_samps]).mean().item()
                 test_recon_mse += mse(prior_out, clip_target[random_samps]).item()
 
-                # EVAL: Feed voxels through OpenCLIP-bigG diffusion prior
-                prior_out = diffusion_prior.p_sample_loop(backbone.shape, 
-                            text_cond = dict(text_embed = backbone), 
-                            cond_scale = 1., timesteps = 20)
-                pred_caption_emb = clip_convert(prior_out)
-                generated_ids = clip_text_model.generate(pixel_values=pred_caption_emb, max_length=20)
-                generated_caption = processor.batch_decode(generated_ids, skip_special_tokens=True)
-                print(generated_caption)
-                all_predcaptions = np.hstack((all_predcaptions, generated_caption))
+                # # EVAL: Feed voxels through OpenCLIP-bigG diffusion prior
+                # prior_out = diffusion_prior.p_sample_loop(backbone.shape, 
+                #             text_cond = dict(text_embed = backbone), 
+                #             cond_scale = 1., timesteps = 20)
+                # pred_caption_emb = clip_convert(prior_out)
+                # generated_ids = clip_text_model.generate(pixel_values=pred_caption_emb, max_length=20)
+                # generated_caption = processor.batch_decode(generated_ids, skip_special_tokens=True)
+                # print(generated_caption)
+                # all_predcaptions = np.hstack((all_predcaptions, generated_caption))
                 # Feed diffusion prior outputs through unCLIP
-                for i in range(len(voxel)):
-                    samples = utils.unclip_recon(prior_out[[i]],
-                                    diffusion_engine,
-                                    vector_suffix,
-                                    num_samples=num_samples_per_image)
-                    if all_recons is None:
-                        all_recons = samples.cpu()
-                    else:
-                        all_recons = torch.vstack((all_recons, samples.cpu()))
-                    if plotting:
-                        plot_dirname = os.environ.get("PLOT_DIRNAME", f"plots")
-                        plt_dir = osp.join(save_dir, plot_dirname)
-                        os.makedirs(plt_dir, exist_ok=True)
-                        for s in range(num_samples_per_image):
-                            img = transforms.ToPILImage()(samples[s])
-                            image_id = image_idx[i].item()
-                            img.save(osp.join(plt_dir, f"recon_sample_{test_i:05}_{i:05}_{image_id:05}.png"))
+                # for i in range(len(voxel)):
+                #     samples = utils.unclip_recon(prior_out[[i]],
+                #                     diffusion_engine,
+                #                     vector_suffix,
+                #                     num_samples=num_samples_per_image)
+                #     if all_recons is None:
+                #         all_recons = samples.cpu()
+                #     else:
+                #         all_recons = torch.vstack((all_recons, samples.cpu()))
+                #     if plotting:
+                #         plot_dirname = os.environ.get("PLOT_DIRNAME", f"plots")
+                #         plt_dir = osp.join(save_dir, plot_dirname)
+                #         os.makedirs(plt_dir, exist_ok=True)
+                #         for s in range(num_samples_per_image):
+                #             img = transforms.ToPILImage()(samples[s])
+                #             image_id = image_idx[i].item()
+                #             img.save(osp.join(plt_dir, f"recon_sample_{test_i:05}_{i:05}_{image_id:05}.png"))
                             
-                        gt_img = transforms.ToPILImage()(image[i])
-                        gt_img.save(osp.join(plt_dir, f"gt_sample_{test_i:05}_{i:05}_{image_id:05}.png"))
+                #         gt_img = transforms.ToPILImage()(image[i])
+                #         gt_img.save(osp.join(plt_dir, f"gt_sample_{test_i:05}_{i:05}_{image_id:05}.png"))
 
-                    if blurry_recon:
-                        image_enc_pred, _ = blurry_image_enc_
-                        blurry_recon_images = (autoenc.decode(image_enc_pred[random_samps]/0.18215).sample / 2 + 0.5).clamp(0,1)
-                        pixcorr = utils.pixcorr(image[random_samps], blurry_recon_images)
-                        test_blurry_pixcorr += pixcorr.item()
+                    # if blurry_recon:
+                    #     image_enc_pred, _ = blurry_image_enc_
+                    #     blurry_recon_images = (autoenc.decode(image_enc_pred[random_samps]/0.18215).sample / 2 + 0.5).clamp(0,1)
+                    #     pixcorr = utils.pixcorr(image[random_samps], blurry_recon_images)
+                    #     test_blurry_pixcorr += pixcorr.item()
 
 
             utils.check_loss(loss)                
@@ -211,7 +176,7 @@ def validation_test(
         # assert (test_i+1) == 1
         logs = {
             "epoch/epoch": epoch,
-            "epoch/test_loss": np.mean(test_losses[-num_test:]),  # Only average losses from current test run
+            "epoch/test_loss": np.mean(test_losses),  # Only average losses from current test run
             "epoch/lr": lrs[-1],
             "epoch/test_fwd_acc": test_fwd_percent_correct / (test_i + 1),
             "epoch/test_bwd_acc": test_bwd_percent_correct / (test_i + 1),
@@ -234,11 +199,99 @@ def validation_test(
                 "epoch/test_recon_mse": test_recon_mse / (test_i + 1),
             })
         
+        if clip_scale > 0:
+            test_fwd_percent_correct = 0
+            test_bwd_percent_correct = 0
+            repeat = 30
+            size = 300
+            for i in range(repeat):
+                random_samps = np.random.choice(np.arange(all_clipvoxels.shape[0]), size=size, replace=False)
+                clip_voxels_norm = nn.functional.normalize(all_clipvoxels[random_samps].flatten(1).cuda(), dim=-1)
+                clip_target_norm = nn.functional.normalize(all_cliptargets[random_samps].flatten(1).cuda(), dim=-1)
+                labels = torch.arange(len(clip_voxels_norm)).to(clip_voxels_norm.device) 
+                test_fwd_percent_correct += utils.topk(utils.batchwise_cosine_similarity(clip_voxels_norm, clip_target_norm), labels, k=1).item()
+                test_bwd_percent_correct += utils.topk(utils.batchwise_cosine_similarity(clip_target_norm, clip_voxels_norm), labels, k=1).item()
+            logs.update({
+                "epoch/eval_fwd_acc": test_fwd_percent_correct/ repeat,
+                "epoch/eval_bwd_acc": test_bwd_percent_correct/ repeat,
+            })
+
+
         for k, v in logs.items():
             print(f"{k}: {v}")
+        # Save logs to file
+        with open(f"{save_dir}/losses.json", 'w') as f:
+            json.dump(logs, f, indent=4)
+        # generate images after computing test loss
+        if use_prior:
+            # sort the test samples by image index
+            infos = []
+            image_idx_to_samples = defaultdict(lambda: [[], [], [], [], []])
+            for images, voxels, subj_idx, coords, image_idxs in tqdm(test_dl, desc=f'Gathering Samples', leave=True):
+                for image, voxel, subj_idx, coord, image_idx in zip(images, voxels, subj_idx, coords, image_idxs):
+                    image_idx = image_idx.item()
+                    if len(image_idx_to_samples[image_idx][0]) >= 3:
+                        continue
+                    image_idx_to_samples[image_idx][0].append(image)
+                    image_idx_to_samples[image_idx][1].append(voxel)
+                    image_idx_to_samples[image_idx][2].append(subj_idx)
+                    image_idx_to_samples[image_idx][3].append(coord)
+                    image_idx_to_samples[image_idx][4].append(image_idx)
+                
+            tbar = tqdm(total=len(image_idx_to_samples), leave=True)
+            for test_i, (image_idx, (images, voxels, subj_idx, coords, image_idxs)) in enumerate(itertools.islice(image_idx_to_samples.items(), num_test)):
+                info = {}
+                status_str = f"Test Epoch {epoch} - Sample {test_i+1}/{num_test}, len(images): {len(images)}"
+                tbar.set_description(status_str)            
+                images = torch.stack(images).to(device)
+                voxels = torch.stack(voxels).to(device)
+                coords = torch.stack(coords).to(device)
+                subj_idx = torch.stack(subj_idx).to(device)
+                assert all(i == image_idx for i in image_idxs)
+                clip_target = clip_img_embedder(images[[0]])
+                backbone, clip_voxels0, blurry_image_enc_ = model(voxels, coords)
+                backbone = torch.mean(backbone, dim=0, keepdim=True)
+                loss_prior, prior_out = diffusion_prior(text_embed=backbone, image_embed=clip_target)
 
-
-
+                # EVAL: Feed voxels through OpenCLIP-bigG diffusion prior
+                prior_out = diffusion_prior.p_sample_loop(backbone.shape, 
+                            text_cond = dict(text_embed = backbone), 
+                            cond_scale = 1., timesteps = 20)
+                pred_caption_emb = clip_convert(prior_out)
+                generated_ids = clip_text_model.generate(pixel_values=pred_caption_emb, max_length=20)
+                generated_caption = processor.batch_decode(generated_ids, skip_special_tokens=True)
+                info.update({"generated_caption": generated_caption})
+                print(generated_caption)
+                # Feed diffusion prior outputs through unCLIP
+                samples = utils.unclip_recon(prior_out,
+                                diffusion_engine,
+                                vector_suffix,
+                                num_samples=num_samples_per_image)
+                if all_recons is None:
+                    all_recons = samples.cpu()
+                else:
+                    all_recons = torch.vstack((all_recons, samples.cpu()))
+                if plotting:
+                    plot_dirname = os.environ.get("PLOT_DIRNAME", f"plots")
+                    plt_dir = osp.join(save_dir, plot_dirname)
+                    os.makedirs(plt_dir, exist_ok=True)
+                    for s in range(num_samples_per_image):
+                        img = transforms.ToPILImage()(samples[s])
+                        recon_img_path = osp.join(plt_dir, f"recon_sample_{test_i:05}_{image_idx:05}.png")
+                        img.save(recon_img_path)
+                        info.update({"recon_img_path": recon_img_path})
+                    gt_img = transforms.ToPILImage()(images[0])
+                    gt_img_path = osp.join(plt_dir, f"gt_sample_{test_i:05}_{image_idx:05}.png")
+                    gt_img.save(gt_img_path)
+                    info.update({"gt_img_path": gt_img_path})
+                # if blurry_recon:
+                #     image_enc_pred, _ = blurry_image_enc_
+                #     blurry_recon_images = (autoenc.decode(image_enc_pred[random_samps]/0.18215).sample / 2 + 0.5).clamp(0,1)
+                #     pixcorr = utils.pixcorr(image[random_samps], blurry_recon_images)
+                #     test_blurry_pixcorr += pixcorr.item()
+                infos.append(info)
+            with open(f"{save_dir}/infos.json", "w") as f:
+                json.dump(infos, f, indent=4)
 def load_validation_components():
     # prep unCLIP
     config = OmegaConf.load("generative_models/configs/unclip6.yaml")
@@ -321,8 +374,8 @@ if __name__ == "__main__":
         diffusion_prior = diffusion_prior.to(device)
 
     # print(model)
-
-    epoch_start, losses, test_losses, lrs, resumed = utils.load_ckpt(args, model, diffusion_prior, tag="iter_135000")
+    TAG = os.environ.get("TAG", "last")
+    epoch_start, losses, test_losses, lrs, resumed = utils.load_ckpt(args, model, diffusion_prior, tag=TAG)
     print(f"model_name: {args.model_name}")    
     print(f"epoch_start: {epoch_start}")
     print(f"len(losses): {len(losses)}, mean(losses): {np.mean(losses)}")
@@ -335,6 +388,7 @@ if __name__ == "__main__":
 
     vector_suffix, clip_text_model, clip_convert, processor, diffusion_engine = load_validation_components()
     # vector_suffix, clip_text_model, clip_convert, processor, diffusion_engine = None, None, None, None, None
+    SAVE_DIR=os.environ.get("SAVE_DIR", "tests/test")
     validation_test(
         args,
         model, clip_img_embedder, diffusion_prior,
@@ -343,5 +397,6 @@ if __name__ == "__main__":
         test_dl,
         epoch_start,
         device,
-        num_eval_batches=2
+        save_dir=SAVE_DIR,
+        num_eval_samples=100
     )

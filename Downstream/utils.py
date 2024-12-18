@@ -422,69 +422,62 @@ def load_ckpt(args, model, diffusion_prior=None, optimizer=None, lr_scheduler=No
                 return epoch, losses, test_losses, lrs, resumed
     
     if os.path.exists(ckpt_path):
-        try:
-            print(f"Loading checkpoint from {ckpt_path}")
-            # Load checkpoint on CPU to avoid GPU RAM spike
-            ckpt = torch.load(ckpt_path, map_location='cpu')
-        
-            if diffusion_prior is not None and 'diffusion_prior' in ckpt:
-                diffusion_prior_state_dict = ckpt['diffusion_prior']
-            elif diffusion_prior is not None:
-                raise ValueError("Diffusion prior state not found in checkpoint, but have diffusion prior model")
-            elif diffusion_prior is None and 'diffusion_prior' in ckpt:
-                raise ValueError("Diffusion prior state found in checkpoint, but no diffusion prior model")
-            else:
-                print("No diffusion prior model")
+        print(f"Loading checkpoint from {ckpt_path}")
+        # Load checkpoint on CPU to avoid GPU RAM spike
+        ckpt = torch.load(ckpt_path, map_location='cpu')
+        diffusion_prior_state_dict = None
+        if diffusion_prior is not None and 'diffusion_prior' in ckpt:
+            diffusion_prior_state_dict = ckpt['diffusion_prior']
+        elif diffusion_prior is not None:
+            # raise ValueError("Diffusion prior state not found in checkpoint, but have diffusion prior model")
+            print("Diffusion prior state not found in checkpoint, but have diffusion prior model")
+        elif diffusion_prior is None and 'diffusion_prior' in ckpt:
+            raise ValueError("Diffusion prior state found in checkpoint, but no diffusion prior model")
+        else:
+            print("No diffusion prior model")
 
-            # Load model state
-            if accelerator is not None:
-                unwrapped_model = accelerator.unwrap_model(model)
-                unwrapped_model.load_state_dict(ckpt['model_state_dict'], strict=strict)
-                if diffusion_prior is not None:
-                    unwrapped_diffusion_prior = accelerator.unwrap_model(diffusion_prior)
-                    unwrapped_diffusion_prior.load_state_dict(diffusion_prior_state_dict, strict=strict)               
-            else:
-                model.load_state_dict(ckpt['model_state_dict'], strict=strict)
-                if diffusion_prior is not None:
-                    diffusion_prior.load_state_dict(diffusion_prior_state_dict, strict=strict)
-            
-            # Load optimizer state if provided
-            if optimizer is not None and 'optimizer_state_dict' in ckpt:
-                optimizer.load_state_dict(ckpt['optimizer_state_dict'])
-            
-            # Load scheduler state if provided
-            if lr_scheduler is not None and 'lr_scheduler' in ckpt:
-                lr_scheduler.load_state_dict(ckpt['lr_scheduler'])
-            
-            # Load training state
-            epoch = ckpt.get('epoch', 0)
-            losses = ckpt.get('train_losses', [])
-            test_losses = ckpt.get('test_losses', [])
-            lrs = ckpt.get('lrs', [])
-            
-            print(f"Successfully loaded checkpoint from epoch {epoch}")
-            resumed = True
-            
-            # Handle wandb logging resume
-            if args.wandb_log and accelerator is not None and accelerator.is_main_process:
-                import wandb
-                if wandb.run is not None:
-                    # Log metrics from previous training
-                    for i, (loss, test_loss, lr) in enumerate(zip(losses, test_losses, lrs)):
-                        wandb.log({
-                            "train/loss": loss,
-                            "test/loss": test_loss,
-                            "train/lr": lr,
-                            "train/epoch": i
-                        })
-            
-        except Exception as e:
-            print(f"Error loading checkpoint: {str(e)}")
-            # Initialize fresh training state
-            epoch = 0
-            losses = []
-            test_losses = []
-            lrs = []
+        # Load model state
+        if accelerator is not None:
+            unwrapped_model = accelerator.unwrap_model(model)
+            unwrapped_model.load_state_dict(ckpt['model_state_dict'], strict=strict)
+            if diffusion_prior is not None and diffusion_prior_state_dict is not None:
+                unwrapped_diffusion_prior = accelerator.unwrap_model(diffusion_prior)
+                unwrapped_diffusion_prior.load_state_dict(diffusion_prior_state_dict, strict=strict)               
+        else:
+            model.load_state_dict(ckpt['model_state_dict'], strict=strict)
+            if diffusion_prior is not None and diffusion_prior_state_dict is not None:
+                diffusion_prior.load_state_dict(diffusion_prior_state_dict, strict=strict)
+        
+        # Load optimizer state if provided
+        if optimizer is not None and 'optimizer_state_dict' in ckpt:
+            optimizer.load_state_dict(ckpt['optimizer_state_dict'])
+        
+        # Load scheduler state if provided
+        if lr_scheduler is not None and 'lr_scheduler' in ckpt:
+            lr_scheduler.load_state_dict(ckpt['lr_scheduler'])
+        
+        # Load training state
+        epoch = ckpt.get('epoch', 0)
+        losses = ckpt.get('train_losses', [])
+        test_losses = ckpt.get('test_losses', [])
+        lrs = ckpt.get('lrs', [])
+        
+        print(f"Successfully loaded checkpoint from epoch {epoch}")
+        resumed = True
+        
+        # Handle wandb logging resume
+        if args.wandb_log and accelerator is not None and accelerator.is_main_process:
+            import wandb
+            if wandb.run is not None:
+                # Log metrics from previous training
+                for i, (loss, test_loss, lr) in enumerate(zip(losses, test_losses, lrs)):
+                    wandb.log({
+                        "train/loss": loss,
+                        "test/loss": test_loss,
+                        "train/lr": lr,
+                        "train/epoch": i
+                    })
+        
     else:
         print(f"No checkpoint found at {ckpt_path}, starting from scratch")
     
